@@ -1,0 +1,7 @@
+wheel
+ffmpeg-python
+requests
+vk_api
+bs4
+pillow
+cryptography

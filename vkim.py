@@ -1,0 +1,965 @@
+#!/usr/bin/env python3
+import sys
+import json
+import time
+import random
+import optparse
+import threading
+import math
+import os
+import re
+import datetime 
+import shutil 
+import requests
+import ffmpeg
+
+from vk_api import VkApi
+from vk_api import audio
+from vk_api.exceptions import AuthError, VkApiError
+
+from PIL import Image
+
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+
+prev_id = prev_date = offset_count = progress_left = 0
+
+def log(status, string, end_symbol='\n'):
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+
+    if status < 0: # verbose check
+        if not options.show_progress: 
+            return
+        else: 
+            status = abs(status)
+    if status == 1: 
+        color = '\33[90m' # info
+    if status == 2: 
+        color = '\033[31;1m' # error
+    if status == 3:
+        if not options.show_warnings: 
+            return
+        else: 
+            color = '\033[33;1m' # warn
+    if status == 4: 
+        color = '\033[32;1m' # pass
+
+    print(f'{color}[{timestamp}]\033[0m {string}', end=end_symbol)
+
+def text_append(dir, bin):
+    with open(dir, 'a') as file:
+        file.write(bin + '\n')
+
+def sizeof_fmt(num):
+    for x in ['bytes', 'KB', 'MB', 'GB']:
+        if num < 1024.0:
+            return "%3.1f %s" % (num, x)
+        num /= 1024.0
+    return "%3.1f %s" % (num, 'TB')
+
+def fix_val(number, digits):
+    return f'{number:.{digits}f}'
+
+def str_toplus(string):
+    return str(abs(int(string)))
+
+def str_tominus(string):
+    return str(-abs(int(string)))
+
+def str_fix(string, letters = 100):
+    return str_cut(re.sub(r'[/\\?%*\-\[\]{}:|"<>]', '', string), letters)
+
+def str_cut(string, letters, postfix='...'):
+    return string[:letters] + (string[letters:] and postfix)
+
+def str_esc(string, url_parse=False):
+    url_regex = r"[-a-zA-Zа-яА-Я0-9@:%_\+.~#?&//=]{2,256}\.[a-zA-Zа-яА-Я0-9]{2,4}\b(\/[-a-zA-Zа-яА-Я0-9@:%_\+.~#?&//=]*)?"
+    html_escape_table = {
+        "&": "&amp;",
+        '"': "&quot;",
+        "'": "&apos;",
+        ">": "&gt;",
+        "<": "&lt;",
+        "\n": "<br/>\n" if url_parse else "\n"
+        }
+
+    string = "".join(html_escape_table.get(c, c) for c in string)
+    link_matches = re.finditer(url_regex, string)#, re.MULTILINE)
+
+    if url_parse:
+        replaced = []
+        for match in link_matches:
+            if match.group()[:+4] in ['http', 'vk.co'] and match.group() not in replaced:
+                string = string.replace(match.group(), f'<a href="{match.group()}" title="{match.group()}">{str_cut(match.group(), 50)}</a>')
+                replaced.append(match.group())
+
+    return string
+
+def rqst_thumb(input, th_w, th_h):
+    try:
+        image = Image.open(input).convert('RGB')
+    except Exception:
+        log(3, f'{input} corrupted ')
+        return {'path': 'broken', 'height': 100, 'width': 100}
+    
+    src_w, src_h = image.size
+    if src_w > th_w or src_h > th_h:
+        path = 'photos/thumbnails/th_' + os.path.basename(input)
+        image.thumbnail((th_w, th_h))
+        src_w, src_h = image.size
+        image.save(path)
+    else:
+        path = 'photos/' + os.path.basename(input)
+        
+    return {'path': path, 'height': src_h, 'width': src_w}
+
+def rqst_photo(input):
+    photo = {'url': 'null', 'height': 100, 'width': 100}
+    current = 0
+    for size in input['sizes']:
+        if size['type'] == 'w':
+            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
+            break
+        elif size['type'] == 's' and current < 1:
+            current = 1
+            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
+        elif size['type'] == 'm' and current < 2:
+            current = 2
+            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
+        elif size['type'] == 'x' and current < 3:
+            current = 3
+            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
+        elif size['type'] == 'y' and current < 4:
+            current = 4
+            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
+        elif size['type'] == 'z' and current < 5:
+            current = 5
+            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
+    return photo
+
+blocks_left = 0
+def rqst_m3u8(track, track_name):
+    # Zerogoki00/vk-audio-downloader
+    global blocks_left
+
+    def rqst(url):
+        while True:
+            try:
+                with requests.get(url, headers={"Accept-Encoding": "identity"}) as request:
+                    if request:
+                        return request.content
+                    else:
+                        log(-3, f'{dir} ({request.status_code})    ')
+                break
+            except Exception as ex:
+                # mostly its "Temporary failure in name resolution" error
+                log(3, f'{url}: {str(ex)}   ')
+                time.sleep(5)
+
+    def get_decryptor(k_url):
+        k = rqst(k_url)
+        c = Cipher(algorithms.AES(k), modes.CBC(b'\x00' * 16), backend=default_backend())
+        return c.decryptor()
+
+    def rqst_block(offset, blocks_list, key_url, decryptor):
+        global blocks_left
+        for i, block in enumerate(blocks_list):
+            if int((i + offset) % options.threads_count) == 1 or options.threads_count < 2:
+                frag_name = f'{track["id"]}-Frag{i}.ts'
+                if not os.path.exists(frag_name):
+                    segments = []
+                    segment_urls = re.findall(r'#EXTINF:\d+\.\d{3},\s(\S*)', block)
+
+                    for s_url in segment_urls:
+                        segments.append(rqst(track['url'][:track['url'].rfind("/")] + "/" + s_url)) # base_url
+
+                    if "METHOD=AES-128" in block:
+                        segment_key_url = re.findall(r':METHOD=AES-128,URI="(\S*)"', block)[0]
+                        if segment_key_url != key_url:
+                            key_url = segment_key_url
+                            decryptor.finalize()
+                            decryptor = get_decryptor(key_url)
+
+                        for j, seg in enumerate(segments):
+                            segments[j] = decryptor.update(seg)
+
+                    downloaded_block = b''.join(segments)
+
+                    with open(frag_name, "wb") as file:
+                        file.write(downloaded_block)
+                        
+                blocks_left = blocks_left + 1
+
+    desc = f'{str_fix(track["artist"], 50)} - {str_fix(track["title"], 50)}'
+
+    if os.path.exists(track_name):
+        log(-1, f'{track_name} already exists, skipping.')
+        return
+
+    blocks = [b for b in rqst(track['url']).decode("utf-8").split("#EXT-X-KEY") if "#EXTINF" in b] # playlist
+    if not blocks: # бывает
+        log(-1, f'{track_name} internal error, skipping.')
+        return
+
+    key_url = re.findall(r':METHOD=AES-128,URI="(\S*)"', blocks[0])[0]
+    blocks_left = 0
+
+    # start threads
+    for i in range(options.threads_count):
+        threading.Thread(target=rqst_block, args=[i, blocks, key_url, get_decryptor(key_url)]).start()
+
+    # waiting for end
+    while threading.activeCount() > 1:
+        log(-1, f'{track_name} {blocks_left}/{len(blocks)}', '\r')
+        time.sleep(0.01)
+
+    log(-1, f'{track_name} merging...', '\r')
+    if os.path.exists(f'{track["id"]}.tmp'):
+        os.remove(f'{track["id"]}.tmp')
+    with open(f'{track["id"]}.tmp', "ab") as out_file:
+        for i in range(len(blocks)):
+            with open(f'{track["id"]}-Frag{i}.ts', "rb") as in_file:
+                out_file.write(in_file.read())
+
+    log(-1, f'{track_name} converting...', '\r')
+    (
+        ffmpeg
+        .input(f'{track["id"]}.tmp')
+        .output(track_name, acodec='copy', **{ 'metadata':f'title={track["title"]}', 'metadata:':f'artist={track["artist"]}' })
+        .run(quiet=True)
+    )
+
+    log(-1, f'{track_name} {fix_val(os.path.getsize(track_name) / 1048576, 2)}MB          ')
+
+    os.remove(f'{track["id"]}.tmp')
+    for i in range(len(blocks)):
+        os.remove(f'{track["id"]}-Frag{i}.ts')
+
+def rqst_file(url, dir):
+    if not url or (os.path.exists(dir) and not options.rewrite_files):
+        return
+    log(-1, f'{dir}' , '\r')
+    while True:
+        try:
+            with requests.get(url, stream=True) as request:
+                if request:
+                    dw_len = int(request.headers.get('Content-Length', '0')) or 10000 #None
+                    block_size = 1024 #1 Kibibyte
+
+                    with open(dir, 'wb', buffering = block_size) as file:
+                        fl_len = 0
+                        for data in request.iter_content(chunk_size = block_size):
+                            fl_size = fix_val(fl_len / 1048576, 2)
+                            progress = float(math.ceil(fl_len / block_size) / math.ceil(dw_len / block_size))
+                            log(-1, f'{dir} {fl_size}MB {fix_val(progress * 100, 2)}%', '\r')
+                            fl_len += len(data)
+                            file.write(data)
+
+                    log(-1, f'{dir} {fl_size}MB        ')
+                        
+                else:
+                    log(-3, f'{dir} ({request.status_code})    ')
+            break
+        except Exception as ex:
+            # mostly its "Temporary failure in name resolution" error
+            log(3, f'{dir}: {str(ex)}   ')
+            time.sleep(5)
+
+def rqst_user(user_id, save=True):
+    for i in range(len(users)):
+        if users[i]['id'] == user_id:
+            return users[i]
+
+    if user_id > 0:
+        object = rqst_method('users.get', {'user_ids': user_id, 'fields': 'photo_200'})[0]
+        object = {'id': user_id, 'photo': object['photo_200'], 'name': object['first_name'] + ' ' + object['last_name']}
+    else:
+        object = rqst_method('groups.getById', {'group_id': str_toplus(user_id), 'fields': 'photo_200'})[0]
+        object = {'id': user_id, 'photo': object['photo_200'], 'name': object['name']}
+
+    if save:
+        rqst_file(object['photo'], f'userpics/id{user_id}.jpg')
+        users[len(users)] = object
+        
+    return object
+
+def rqst_method(method, values={}):
+    while True:
+        try:
+            request = vk_session.method(method, values, raw=True)
+            return request['response']
+        except Exception as ex:
+            ex_str = str(ex)
+
+            # invalid login/pass or some shit
+            if '[5] User authorization failed:' in ex_str:
+                log(2, 'autechre error: ' + ex_str[31:])
+                sys.exit()
+
+            # invalid id
+            if 'Invalid user id' in ex_str or 'group_ids is undefined' in ex_str:
+                return None
+
+            # occurs with frequent logins
+            if 'Internal server error' in ex_str:
+                log(3, f'internal catched, waiting...   ')
+                time.sleep(60)
+
+            else:
+                log(2, f'execption in \'{method}\': {ex_str}   ')
+                time.sleep(5)
+
+def rqst_message_service(input):
+    goto_link = '<a href="#go_to_message%d" onclick="return GoToMessage(%d)" title="%s" style="color: #70777b">%s</a>'
+    url_link = '<a href="%s" style="color: #70777b">%s</a>'
+
+    from_id = rqst_user(input['from_id'])
+    from_prefix = 'https://vk.com/id' if from_id['id'] > 0 else 'https://vk.com/club'
+    type = input['action']['type']
+    
+    message = ''
+
+    if type == 'chat_create':
+        message = url_link % (from_prefix + str_toplus(from_id['id']), from_id['name']) + f' создал беседу «{input["action"]["text"]}»'
+
+    if type == 'chat_title_update':
+        message = url_link % (from_prefix + str_toplus(from_id['id']), from_id['name']) + f' изменил название беседы на «{input["action"]["text"]}»'
+ 
+    if type == 'chat_invite_user_by_link':
+        message = url_link % (from_prefix + str(from_id['id']), from_id['name']) + ' присоединился к беседе по ссылке'
+
+    if type == 'chat_photo_update':
+        rqst_file(rqst_photo(input['attachments'][0]['photo'])['url'], f'userpics/up{input["conversation_message_id"]}.jpg')
+        
+        message = (
+            f'{url_link % (from_prefix + str_toplus(from_id["id"]), from_id["name"])} обновил фотографию беседы\n'
+            f'<div class="userpic_wrap">'
+            f'    <a class="userpic_link" href="userpics/up{input["conversation_message_id"]}.jpg">\n'
+            f'        <img class="userpic" src="userpics/up{input["conversation_message_id"]}.jpg" style="width: 60px; height: 60px">'
+            f'    </a>'
+            f'</div>\n'
+        )
+
+    if type == 'chat_photo_remove':
+        message = (f'{url_link % (from_prefix + str_toplus(from_id["id"]), from_id["name"])} удалил фотографию беседы\n')
+
+    if type in ['chat_pin_message', 'chat_unpin_message']:
+        prefix = ' закрепил ' if type == 'chat_pin_message' else ' открепил '
+        member_id = rqst_user(input['action']['member_id'])
+        message = url_link % (from_prefix + str(member_id['id']), member_id['name']) + prefix
+        
+        if 'message' in input['action']:
+            message += 'сообщение: ' + goto_link % (
+                input['action']["conversation_message_id"], 
+                input['action']["conversation_message_id"], 
+                input['action']['message'],
+                f'«{input["action"]["message"]}»')
+        else:
+            message += goto_link % (input['action']["conversation_message_id"], input['action']["conversation_message_id"], '', 'сообщение')
+
+    if type in ['chat_invite_user', 'chat_kick_user']:
+        us_prefix = 'https://vk.com/id' if input['from_id'] > 0 else 'https://vk.com/club'
+        us_postfix = 'https://vk.com/id' if input['action']['member_id'] > 0 else 'https://vk.com/club'
+
+        if type == 'chat_invite_user':
+            self_prefix = ' вернулся в беседу'
+            other_prefix = ' пригласил '
+        else:
+            self_prefix = ' вышел из беседы'
+            other_prefix = ' исключил '
+
+        if input['from_id'] == input['action']['member_id']:
+            message = url_link % (us_prefix + str_toplus(from_id['id']), from_id['name']) + self_prefix
+        else:
+            passive = rqst_user(input['action']['member_id'])
+            message = url_link % (us_prefix + str_toplus(from_id['id']), from_id['name']) + other_prefix + url_link % (us_postfix + str_toplus(passive['id']), passive['name'])
+            
+    if not message:
+        log(2, f'missing_service: {input}')
+
+    return f'\n<div class="message service" id="message{input["id"]}"><div class="body details">\n    {message}</div>\n</div>\n'
+
+def rqst_attachments(input):
+    sw_joined = False
+    pre_attachments = post_attachments = ''
+
+    data_blank = (
+        '%s\n'
+        '   <div class="fill pull_left"></div>\n'
+        '   <div class="body">\n'
+        '       <div class="title bold">%s</div>\n'
+        '       <div class="status details">%s</div>\n'
+        '   </div>'
+        '</a>\n'
+    )
+    
+    human_date = datetime.datetime.fromtimestamp(input['date']).strftime('%y-%m-%d_%H-%M-%S')
+
+    if 'geo' in input:
+        sw_joined = True
+        html_details = f'{input["geo"]["coordinates"]["latitude"]}, {input["geo"]["coordinates"]["longitude"]}'
+        if 'place' in input["geo"]:
+            html_details = f'{input["geo"]["place"]["title"]} ({html_details})'
+
+        pre_attachments = '<div class="media_wrap clearfix">\n%s</div>\n' % ( data_blank % ('<a class="media clearfix pull_left block_link media_location">', 
+                                                                                            'Местоположение', 
+                                                                                            html_details) )
+        
+    for i in range(len(input['attachments'])):
+        a = input['attachments'][i]
+        type = a['type']
+
+        data_fragment = 'missing_attachment = %s' % a
+        json_fragment = '' if options.skip_json else f'title="{str_esc(json.dumps(a, indent=10, ensure_ascii=False, sort_keys=True))}"'
+
+        if type == 'wall':
+            href = f'https://vk.com/wall{a["wall"]["to_id"]}_{a["wall"]["id"]}'
+            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{href}">', 
+                                          'Запись', 
+                                          href)
+
+        if type == 'poll':
+            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="https://vk.com/poll{a["poll"]["owner_id"]}_{a["poll"]["id"]}">', 
+                                          'Опрос', 
+                                          f'id{a["poll"]["question"]}')
+
+        if type == 'gift':
+            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{a["gift"]["thumb_256"]}">', 
+                                          'Подарок', 
+                                          f'id{a["gift"]["id"]}')
+
+        if type == 'link':
+            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{a["link"]["url"]}">', 
+                                          a['link']['title'], 
+                                          a['link']['caption'] if 'caption' in a['link'] else '')
+
+        if type == 'market':
+            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_invoice" {json_fragment} href="https://vk.com/market{a["market"]["owner_id"]}_{a["market"]["id"]}">', 
+                                          a['market']['title'], 
+                                          a['market']['price']['text']) 
+
+        if type == 'wall_reply':
+            if 'deleted' in a['wall_reply']:
+                html_title = 'Комментарий к записи (удалён)'
+                href = ''
+            else:
+                html_title = 'Комментарий к записи'
+                href = f'https://vk.com/wall{a["wall_reply"]["owner_id"]}_{a["wall_reply"]["post_id"]}?reply={a["wall_reply"]["id"]}'
+
+            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{href}">', html_title, href)
+
+        if type == 'doc':
+            namefile = str_fix(str_cut(a['doc']['title'], 80, ''))
+            if namefile[-len(a['doc']['ext']):] == a['doc']['ext']:
+                namefile = namefile[:-len(a['doc']['ext']) - 1]
+
+            if options.skip_docs:
+                href = a['doc']['url']
+            else:
+                href = f'docs/{namefile}-{i}-{input["conversation_message_id"]}_{human_date}.{a["doc"]["ext"]}'
+                rqst_file(a['doc']['url'], href)
+                
+            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_file" {json_fragment} href="{href}">', 
+                                          namefile + '.' + a['doc']['ext'], 
+                                          f'{sizeof_fmt(a["doc"]["size"])} ({a["doc"]["owner_id"]}_{a["doc"]["id"]})')
+
+        if type == 'video':
+            # todo: yt-dl?
+            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_video" {json_fragment} href="https://vk.com/video{a["video"]["owner_id"]}_{a["video"]["id"]}">', 
+                                          f'{a["video"]["title"]}', 
+                                          f'{datetime.timedelta(seconds=int(a["video"]["duration"]))} | {a["video"]["owner_id"]}_{a["video"]["id"]}')
+
+        if type == 'audio':
+            audio_name = str_fix(str_cut(f'{a["audio"]["artist"]} - {a["audio"]["title"]} ({a["audio"]["owner_id"]}_{a["audio"]["id"]})', 80, ''))
+            try:
+                href = f'music/{audio_name}.mp3'
+                if options.skip_music:
+                    assert False
+
+                if os.path.exists(href) and not options.rewrite_files:
+                    pass
+                else:
+                    audio = vk_audio.get_audio_by_id(a["audio"]["owner_id"], a["audio"]["id"])
+                    if 'mp3' in audio['url']:
+                        rqst_file(audio['url'], href)
+                    elif 'm3u8' in audio['url']:
+                        rqst_m3u8(audio, href)
+                    else:
+                        assert False
+            except (StopIteration, ValueError, AssertionError):
+                href = f'https://m.vk.com/audio{a["audio"]["owner_id"]}_{a["audio"]["id"]}'
+                
+            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_audio_file" {json_fragment} href="{href}">', 
+                                        audio_name, 
+                                        f'{datetime.timedelta(seconds=int(a["audio"]["duration"]))} | {a["audio"]["owner_id"]}_{a["audio"]["id"]} ')
+        
+        if type == 'call':
+            html_title = 'Исходящий ' if input['from_id'] == a['call']['initiator_id'] else 'Входящий '
+            html_title += 'звонок' if a['call']['video'] == False else 'видеозвонок'
+
+            if a['call']['state'] == 'canceled_by_initiator':
+                html_details = 'Отменён'
+            if a['call']['state'] == 'canceled_by_receiver':
+                html_details = 'Отклонён'
+            if a['call']['state'] == 'reached':
+                html_details = f'Завершен ({datetime.timedelta(seconds=int(a["call"]["duration"]))})'
+
+            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_call" {json_fragment}>', 
+                                            html_title, 
+                                            html_details)
+
+        if type == 'graffiti':
+            height = a["graffiti"]["height"]
+            width = a["graffiti"]["width"]
+
+            if options.skip_graffiti:
+                data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{a["graffiti"]["url"]}">', 
+                                              'Граффити', 
+                                              f'{height}x{width}')
+            else:
+                namefile = f'graffiti-{input["conversation_message_id"]}-{i}_{human_date}.jpg'
+                rqst_file(a["graffiti"]['url'], 'photos/' + namefile)
+                thumb = rqst_thumb('photos/' + namefile, 350, 300)
+
+                data_fragment = (
+                    f'<a class="photo_wrap clearfix pull_left" href="photos/{namefile}">\n'
+                    f'<img class="photo" src="{thumb["path"]}" style="width: {thumb["width"]}px; height: {thumb["height"]}px"/></a>'
+                )
+
+
+        if type == 'audio_message':
+            if options.skip_voices:
+                href = a['audio_message']['link_ogg']
+            else:
+                href = f'voice_messages/audio-{i}-{input["conversation_message_id"]}_{human_date}.ogg'
+                rqst_file(a['audio_message']['link_ogg'], href)
+
+            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_voice_message" {json_fragment} href="{href}">', 
+                                          'Голосовое сообщение', 
+                                          datetime.timedelta(seconds=int(a["audio_message"]["duration"])))
+
+        if type == 'sticker':
+            if options.skip_stickers:
+                data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{a["sticker"]["images"][1]["url"]}">', 
+                                              'Стикер', 
+                                              f'id{a["sticker"]["sticker_id"]}')
+            else:
+                rqst_file(a['sticker']['images'][1]['url'], f'userpics/st{a["sticker"]["sticker_id"]}.jpg')
+                
+                data_fragment = (
+                    f'<a class="sticker_wrap clearfix pull_left" href="userpics/st{a["sticker"]["sticker_id"]}.jpg">\n'
+                    f'<img class="sticker" src="userpics/st{a["sticker"]["sticker_id"]}.jpg" style="width: 128px; height: 128px"/></a>'
+                )
+
+        if type == 'photo':
+            photo = rqst_photo(a['photo'])
+
+            if options.skip_photos:
+                data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{photo["url"]}">', 
+                                              'Фото',
+                                              f'{photo["height"]}x{photo["width"]}')
+            else:
+                photo_date = datetime.datetime.fromtimestamp(a['photo']['date']).strftime('%y-%m-%d_%H-%M-%S')
+                namefile = f'ph-{input["conversation_message_id"]}-{i}_{photo_date}.jpg'
+                rqst_file(photo['url'], 'photos/' + namefile)
+                thumb = rqst_thumb('photos/' + namefile, 350, 280)
+
+                data_fragment = (
+                    f'<a class="photo_wrap clearfix pull_left" href="photos/{namefile}">\n'
+                    f'<img class="photo" src="{thumb["path"]}" style="width: {thumb["width"]}px; height: {thumb["height"]}px"/></a>'
+                )
+
+
+        if 'missing_attachment' in data_fragment:
+            log(2, f'missing_attachment: {a}')
+
+        if sw_joined:
+            post_attachments += (
+                f'<div class="message default clearfix joined">\n'
+                f'    <div class="body">{data_fragment}\n'
+                f'    </div>\n'
+                f'</div>\n'
+            )
+        else:
+            pre_attachments = f'<div class="media_wrap clearfix">\n{data_fragment}</div>\n'
+            sw_joined = True
+
+    return (pre_attachments, post_attachments)
+
+def rqst_message(input, forwarded=False):
+    global prev_id, prev_date
+    fwd_messages = ''
+    from_id = rqst_user(input['from_id'])
+    
+    # url selection
+    if from_id['id'] > 0:
+        sender = f'<a href="https://vk.com/id{from_id["id"]}">{from_id["name"]}</a>'    
+    else:
+        sender = f'<a href="https://vk.com/club{str_toplus(from_id["id"])}">{from_id["name"]}</a>'
+
+    # message sending/changing time
+    date = datetime.datetime.fromtimestamp(input['date']).strftime('%d/%m/%y %H:%M:%S')
+    if 'update_time' in input:
+        date = f'({datetime.datetime.fromtimestamp(input["update_time"]).strftime("%H:%M:%S")}) {date}' 
+
+    # missing id fix
+    if 'conversation_message_id' not in input:
+        input["conversation_message_id"] = random.randint(-100,-1)
+
+    # reply message
+    if 'reply_message' in input:
+        if 'conversation_message_id' in input['reply_message']:
+            fwd_messages += rqst_message(input['reply_message'], True) 
+        else:
+            fwd_messages +=  f'<div title="{input["reply_message"]}" class="reply_to details">Нет id пересланного сообщения</div>\n' 
+
+    # forwarded messages
+    if 'fwd_messages' in input:
+        for i in input['fwd_messages']:
+            fwd_messages += rqst_message(i, True)
+
+    # requesting attachments
+    pre_attachments, post_attachments = rqst_attachments(input)
+
+    # blank selection
+    if forwarded:
+        blank = fwd_blank
+    elif prev_id == from_id['id'] and input['date'] - prev_date < 120:
+        blank = jnd_blank
+    else:
+        prev_date = input['date']
+        prev_id = from_id['id']
+        blank = def_blank
+
+    return blank % (input["conversation_message_id"], 
+                    from_id["id"], from_id["id"],
+                    sender if forwarded else date, 
+                    date if forwarded else sender, 
+                    fwd_messages,
+                    str_esc(input["text"], True),
+                    '<div class="message default"></div>\n' if input["text"] != '' and forwarded and 'fwd_messages' not in input else '' + pre_attachments, 
+                    post_attachments)
+
+def makehtml(filename, page, page_number, count, target, chat, const_offset_count):
+    global progress_left, offset_count
+    progress_ch = 0
+    for i in range(page_number):
+        #empty check
+        while True:
+            chunk = rqst_method('messages.getHistory', {'peer_id': target, 'count': 200, 'extended': 1, 'offset': offset_count * 200})
+            if len(chunk['items']) != 0 or offset_count < 0:
+                break
+            else:
+                offset_count -= 1
+
+        for msg in reversed(chunk['items']):
+            # progress drawing
+            progress = (progress_left + 1) / count
+            if isinstance(progress, int): progress = float(progress)
+            block = int(round(7 * progress))
+
+            if not options.show_progress or progress_ch != offset_count:
+                progress_ch = offset_count
+                log(1, f'[{str_cut(str_fix(chat["title"]), 20)}] '                                              
+                    f'[{"#" * block + "-" * (7 - block)}] '   
+                    f'[{fix_val(progress * 100, 1)}%] '                                                        
+                    f'[{progress_left + 1} / {count}] '    
+                    
+                    f'u{len(users)} '
+                    f'pg{page + 1}/{count // ( 200 * page_number ) + 1} ' 
+                    f'pch{i + 1}/{options.page_number} '  
+                    f'mch{const_offset_count - offset_count}/{const_offset_count}', '\n' if options.show_progress else '\r')                                                     # percentage
+
+            #message request
+            if 'action' in msg:
+                text_append(filename, rqst_message_service(msg))
+            else:
+                text_append(filename, rqst_message(msg))
+
+            progress_left += 1
+        offset_count -= 1
+
+def makedump(target):   
+    global progress_left, offset_count
+
+    start_time = time.time()
+    me = rqst_method('users.get')[0]
+
+    # html header generation
+    if target > 2e9:
+        request = rqst_method('messages.getChat', {'chat_id': target - int(2e9), 'fields': 'photo_200'})
+        chat = {'title': request['title'], 'photo': request['photo_200'] if 'photo_200' in request else 'https://vk.com/images/deactivated_200.png'}
+        admin = rqst_user(request['admin_id'], False)
+        info = (f'Название: {chat["title"]}\n'
+                f'Сохранено в: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
+                f'Сидящий: {me["first_name"]} {me["last_name"]} ({me["id"]})\n'
+                f'Админ: {admin["name"]} ({admin["id"]})\n'
+                f'Юзеров: {request["members_count"]}')
+    else:
+        request = rqst_user(target, False)
+        chat = {'title': request['name'], 'photo': request['photo']}
+        info = (f'Название: {chat["title"]}\n'
+                f'Сохранено в: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
+                f'Сидящий: {me["first_name"]} {me["last_name"]} ({me["id"]})')
+
+    # directory preparation
+    work_dir = '%s (%s)' % (str_cut(str_fix(chat["title"]), 40, ''), str(target))
+
+    if not os.path.exists(work_dir):
+        shutil.copytree('blank', work_dir)
+    os.chdir(work_dir)
+
+    if not options.skip_voices:
+        os.makedirs('voice_messages', exist_ok=True)
+    if not options.skip_music:
+        os.makedirs('music', exist_ok=True)
+    if not options.skip_photos or not options.skip_graffiti:
+        os.makedirs('photos/thumbnails', exist_ok=True)
+    if not options.skip_docs:
+        os.makedirs('docs', exist_ok=True)
+    os.makedirs('userpics', exist_ok=True)
+
+    rqst_file(chat['photo'], 'userpics/main.jpg')
+    
+    # html page creation
+    progress_left = 0
+    count = rqst_method('messages.getHistory', {'peer_id': target, 'count': 0})['count']
+    const_offset_count = offset_count = count // 200 + 1
+
+    page_count = count // (200 * options.page_number) + 1
+    
+    for page in range(page_count):
+        filename = f'messages{page + 1}.html'
+        if os.path.exists(filename):
+            os.remove(filename)
+
+        # writing header
+        text_append(filename, mainfile % ( str_esc(chat["title"]), info, str_esc(chat["title"]) ) )
+
+        # writing link to the previous page
+        if page != 0:
+            text_append(filename, f'\n<a class="pagination block_link" href="messages{page}.html">Предыдущая страница ( {page} / {page_count} )</a>\n')
+
+        # writing messages
+        makehtml(filename, page, options.page_number, count, target, chat, const_offset_count)
+        
+        # writing link to the next page
+        if page + 1 != page_count:
+            text_append(filename, f'\n<a class="pagination block_link" href="messages{page + 2}.html">Cледующая страница ( {page + 2} / {page_count} )</a>\n')
+
+        # writing (((eof)))
+        text_append(filename, '\n            </div>\n        </div>\n    </div>\n</body>\n</html>')
+        
+    os.chdir('..')
+    log(4, f'[{str_cut(str_fix(chat["title"]), 20)}] [{datetime.timedelta(seconds=int(fix_val(time.time() - start_time, 0)))}]')
+
+mainfile = (
+        '<!DOCTYPE html>\n'
+        '<html>\n'
+        '\n'
+        '<head>\n'
+        '    <meta charset="utf-8" />\n'
+        '    <title>%s</title>\n'
+        '    <meta content="width=device-width, initial-scale=1.0" name="viewport" />\n'
+        '    <link href="style.css" rel="stylesheet" />\n'
+        '    <script src="script.js" type="text/javascript"></script>\n'
+        '</head>\n'
+        '\n'
+        '<body onload="CheckLocation();">\n'
+        '    <div class="page_wrap">\n'
+        '        <div class="page_header">\n'
+        '            <div class="content">\n'
+        '                <div class="text bold" title="%s">%s\n'
+        '                    <div class="pull_right userpic_wrap">\n'
+        '                        <div class="userpic" style="width: 25px; height: 25px">\n'
+        '                            <a class="userpic_link" href="userpics/main.jpg">\n'
+        '                                <img class="userpic" src="userpics/main.jpg" style="width: 25px; height: 25px" />\n'
+        '                            </a>\n'
+        '                        </div>\n'
+        '                    </div>\n'
+        '                </div>\n'
+        '            </div>\n'
+        '        </div>\n'
+        '        <div class="page_body chat_page">\n'
+        '            <div class="history">\n'
+)
+
+def_blank = (
+        '<div class="message default clearfix" id="message%s">\n'
+        '    <div class="pull_left userpic_wrap">\n'
+        '        <div class="userpic" style="width: 42px; height: 42px">\n'
+        '            <a class="userpic_link" href="userpics/id%s.jpg">\n'
+        '                <img class="userpic" src="userpics/id%s.jpg" style="width: 42px; height: 42px" />\n'
+        '            </a>\n'
+        '        </div>\n'
+        '    </div>\n'
+        '    <div class="body">\n'
+        '        <div class="pull_right date details">%s</div>\n'
+        '        <div class="from_name">%s</div>\n'
+        '%s' # reply_message, fwd_messages
+        '        <div class="text">\n%s\n</div>\n'
+        '%s' # fwd_text_prefix, pre_attachments
+        '    </div>\n'
+        '</div>\n'
+        '%s\n' # post_attachments
+)
+
+fwd_blank = (
+        '<div class="pull_left forwarded userpic_wrap">\n'
+        '    <!-- start-fwd-id=%s" -->\n'
+        '    <div class="userpic" style="width: 42px; height: 42px">\n'
+        '        <a class="userpic_link" href="userpics/id%s.jpg">\n'
+        '            <img class="userpic" src="userpics/id%s.jpg" style="width: 42px; height: 42px" /></a>\n'
+        '    </div>\n'
+        '</div>\n'
+        '<div class="forwarded body">\n'
+        '    <div class="from_name">\n'
+        '        %s<span class="details"> %s</span>\n'
+        '    </div>\n'
+        '%s' # reply_message, fwd_messages
+        '    <div class="text">\n%s</div>\n'
+        '%s' # fwd_text_prefix, pre_attachments
+        '</div>\n'
+        '%s' # post_attachments
+        '<!-- end-fwd -->\n'
+)
+
+jnd_blank = (
+        '<div class="message default clearfix joined" id="%s">\n'
+        '    <!-- joined-id%s-id%s" -->\n'
+        '    <div class="body">\n'
+        '        <div class="pull_right date details">%s</div>\n'
+        '    <!-- joined-name %s" -->\n'
+        '%s' # reply_message, fwd_messages
+        '        <div class="text">\n%s</div>\n' 
+        '%s' # fwd_text_prefix, pre_attachments
+        '    </div>\n'
+        '</div>\n'
+        '%s\n' # post_attachments
+)
+
+if __name__ == "__main__":
+    def rqst_dialogs():
+        conversations = []
+        count = rqst_method('messages.getConversations', {'count': 0})['count']
+        for offset in range(count // 200 + 1):
+            chunk = rqst_method('messages.getConversations', {'count': 200, 'extended': 1, 'offset': offset * 200})
+            for item in chunk['items']:
+                conversations.append(item['conversation']['peer']['id'])
+        log(1, 'loaded %s dialogs!' % len(conversations))
+        return conversations
+
+    parser = optparse.OptionParser()
+
+    parser.add_option('--novoice',      dest='skip_voices',     action='store_true', help='Don\'t save voice messages')
+    parser.add_option('--nomusic',      dest='skip_music',      action='store_true', help='Don\'t save music files')
+    parser.add_option('--nophoto',      dest='skip_photos',     action='store_true', help='Don\'t save pictures')
+    parser.add_option('--nograffiti',   dest='skip_graffiti',   action='store_true', help='Don\'t save graffiti')
+    parser.add_option('--nostickers',   dest='skip_stickers',   action='store_true', help='Don\'t save stickers')
+    parser.add_option('--nodoc',        dest='skip_docs',       action='store_true', help='Don\'t save documents')
+    parser.add_option('--nojson',       dest='skip_json',       action='store_true', help='Don\'t save json applications')
+    parser.add_option('-a', '--noall',  dest='skip_all',        action='store_true', help='Don\'t save anything (except json)')
+
+    parser.add_option('-i', '--info',   dest='login_info', default='', help='Login info (token or login:pass)')
+    parser.add_option('-n', '--pagenum', dest='page_number', type=int, default='1000', help='Number of messages in one html file')
+    parser.add_option('-r', '--rewrite', dest='rewrite_files', action='store_true', help='Force rewriting files')
+    parser.add_option('-t', '--threads', dest='threads_count', type=int, default='5', help='Number of threads for m3u8 downloading')
+
+    parser.add_option('-w', '--show-warnings', dest='show_warnings', action='store_true', help='Show warnings')
+    parser.add_option('-v', '--show-progress',  dest='show_progress', action='store_true', help='Show progress info (verbose)')
+
+    options, arguments = parser.parse_args()
+
+    if options.skip_all:    
+        options.skip_music = True
+        options.skip_voices = True
+        options.skip_photos = True
+        options.skip_graffiti = True
+        options.skip_stickers = True
+        options.skip_docs = True
+
+    options.page_number = int(options.page_number) // 200 + 1
+
+    conversations = []
+
+    if ':' in options.login_info:
+        lp = options.login_info.split(':')
+        vk_session = VkApi(lp[0], lp[1], app_id=2685278, config_filename='lsconfig.json')
+        while True:
+            try:
+                vk_session.auth()
+                os.remove('lsconfig.json')
+                conversations = rqst_dialogs()
+
+                #vk = vk_audio.VkAudio(login=lp[0],password=lp[1])
+                vk_audio = audio.VkAudio(vk_session)
+
+                break
+            except AuthError as ex:
+                # idk lmao
+                if 'vk_api@python273.pw' in str(ex):
+                    log(2, f'unknown catched, retrying...   ')
+                    time.sleep(10)
+                else:
+                    log(2, 'autechre error: ' + str(ex))
+                    sys.exit()
+
+    elif len(options.login_info) == 85:
+        vk_session = VkApi(token=options.login_info)
+        conversations = rqst_dialogs()
+        log(1, 'token used, audio is not dumped')
+        options.skip_music = True
+    else:
+        log(2, 'login info is empty')
+        sys.exit()
+
+    if len(arguments):
+        for i in arguments:
+            users = {}
+            prev_id = 0
+            prev_date = 0
+
+            if i == 'self':
+                makedump(rqst_method('users.get')[0]['id'])
+
+            elif i[:+1] == '@':
+                makedump(2000000000 + int(i[1:]))
+
+            else:
+                work = None
+
+                if isinstance(work, int): 
+                    work = abs(work)
+
+                check_group = rqst_method('groups.getById', {'group_ids': i})
+                check_user = rqst_method('users.get', {'user_ids': i})
+
+                # сhecking for id in dialogs (can be disabled)
+                if check_group != None and -check_group[0]['id'] in conversations:
+                    work = str_tominus(check_group[0]['id'])
+                if check_user != None and check_user[0]['id'] in conversations: 
+                    work = str_toplus(check_user[0]['id'])
+
+                if work == None:
+                    log(2, f'{i} is invalid')
+                else:
+                    makedump(int(work))
+    else: # no args = dump all
+        me = rqst_method('users.get')[0]
+        me_dir = 'Диалоги %s (%s)' % (str_fix(me['first_name'] + ' ' + me['last_name']), me['id'])
+        os.makedirs(me_dir, exist_ok=True)
+        if not os.path.exists(f'{me_dir}/blank'):
+            shutil.copytree('blank', f'{me_dir}/blank')
+        os.chdir(me_dir)
+        start_time = time.time()
+
+        for i in range(len(conversations)):
+            users = {}
+            prev_id = 0
+            prev_date = 0      
+            makedump(conversations[i]) 
+
+        end_time = fix_val(time.time() - start_time, 0)
+        log(4, f'all saved in: {datetime.timedelta(seconds=int(end_time))}')
+        shutil.rmtree('blank')
+        sys.exit()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import time, threading, sys, os, json, datetime, requests, optparse, re, hashlib
+import time, threading, sys, os, json, datetime, requests, optparse, re, hashlib, logging
 from vk_api import VkApi
 from vk_api.exceptions import AuthError, VkApiError
 
@@ -10,23 +10,6 @@ progress_all = 0
 
 def date_time(format):
     return datetime.datetime.now().strftime(format)
-
-def log(status, string):
-    datestr = date_time("%H:%M:%S")
-    if status in ['w', 'i'] and not options.show_warnings:
-        return
-    if status == 'e': 
-        prefix = f'\033[31;1m[{datestr}]\033[0m'
-    if status == 'w': 
-        prefix = f'\033[33;1m[{datestr}]\033[0m'
-    if status == 'i': 
-        prefix = f'\33[90m[{datestr}]\033[0m'
-    print(prefix, string)
-
-def str_isminus(string):
-    # group check
-    string = str(string)
-    return string[0] == '-'
 
 def str_toplus(string):
     string = str(string)
@@ -65,30 +48,30 @@ def rqst_method(method, values={}):
 
             # invalid login/pass
             if '[5]' in ex_str:
-                log('e', 'autechre error: ' + ex_str[31:])
+                logging.error('autechre error: ' + ex_str[31:])
                 sys.exit()
 
             # invalid id / no albums in group
             elif re.findall('\[100\]|\[113\]|group photos are disabled', ex_str):
-                log('i', f'no id / no albums: {values}, {str(ex)}')
+                logging.error(f'no id / no albums: {values}, {str(ex)}')
                 return None
 
             # no access to albums
             elif re.findall('\[18\]|\[30\]|\[15\]|\[200\]', ex_str):
-                log('i', f'no access: {values}, {str(ex)}')
+                logging.error(f'no access: {values}, {str(ex)}')
                 return False
 
             # occurs with frequent requests
             elif 'server' in ex_str:
-                log('w', f'internal catched, waiting...   ')
+                logging.error(f'internal catched, waiting...   ')
                 time.sleep(60)
 
             else:
-                log('w', f'\'{method}\': {ex_str}')
+                logging.error(f'\'{method}\': {ex_str}')
                 time.sleep(5)
 
 def download_thread(offset, images, progress_show):
-    def is_exist(filename, dir):
+    def is_exist(filename, dir): # what
         if filename in dir:
             return True
         for file in dir:
@@ -98,21 +81,18 @@ def download_thread(offset, images, progress_show):
 
     global progress_left, progress_all
     dir_list = os.listdir()
-
     for i in range(len(images)):
         if int((i + offset) % options.threads_count) == 1 or options.threads_count < 2:
             picture = images[str(i)]['picture']
-            filename = rqst_filename(i, picture)
             text = images[str(i)]['text']
             date = images[str(i)]['date']
-
+            filename = rqst_filename(i, picture)
+            output = None
             #likes = images[str(i)]['likes']
             #comments = images[str(i)]['comments'] 
             #tags = images[str(i)]['tags']
             #reposts = images[str(i)]['reposts']
-
-            output = None
-
+            
             if not is_exist(filename, dir_list) or options.rewrite_files: 
                 while True:
                     try:
@@ -120,25 +100,28 @@ def download_thread(offset, images, progress_show):
                             if request:
                                 output = request.content
                             else:
-                                log('e', f'{filename} not saved ({request.status_code})    ')
+                                logging.error(f'{request.status_code} {filename}')
                         break
                     except Exception as ex:
-                        log('i', f'\'{filename}\': {str(ex)}   ')
+                        logging.warning(f'{filename}: {str(ex)}    ')
                         time.sleep(5)
 
-                if text is not None:
+                if text:
                     with open(f'{filename}_description.txt', 'w') as file:
                         file.write(text + '\n')
-
-                        if date is not None:
+                        if date:
                             os.utime(f'{filename}_description.txt', (date, date))
 
-                if output is not None:
+                if output:
                     with open(filename, 'wb') as file:
                         file.write(output)
-
-                        if date is not None:
+                        if date:
                             os.utime(filename, (date, date))
+
+            elif is_exist(filename, dir_list) and date:
+                os.utime(filename, (date, date))
+                if text:
+                    os.utime(f'{filename}_description.txt', (date, date))
 
             progress_left += 1
             progress_upd(progress_all, progress_left, progress_show)
@@ -146,10 +129,7 @@ def download_thread(offset, images, progress_show):
 def get_json(filename):
     start_time = time.time()
     with open(filename) as file:
-        try:
-            i_json = json.load(file)
-        except:
-            return
+        i_json = json.load(file)
 
     global progress_all, progress_left
     progress_all = len(i_json)
@@ -160,7 +140,7 @@ def get_json(filename):
         threading.Thread(target=download_thread, args=[i, i_json, filename]).start()
 
     # waiting for end
-    while threading.activeCount() > 1:
+    while threading.active_count() > 1:
         time.sleep(0.01)
 
     # printing time and exit from dir
@@ -169,16 +149,18 @@ def get_json(filename):
 
 def get_album(t_info, input_str, prefix):
     def add_items(json):
-        def dict_append(picture, text, date, likes, comments, tags, reposts):
-            images[str(len(images))] = {'picture': picture, 
-                                        'text': text, 
-                                        'date': date, 
-                                        'likes': likes,
-                                        'comments': comments,
-                                        'tags': tags,
-                                        'reposts': reposts}
+        def dict_append(url, item):
+            images[str(len(images))] = {
+                'picture': url, 
+                'text': item['text'] if item['text'] else None, 
+                'date': item['date'] if 'date' in item else None, 
+                'likes': item['likes']['count'] if item['likes'] else None,
+                'comments': item['comments']['count'] if 'comments' in item else None,
+                'tags': item['tags']['count'] if item['tags'] else None,
+                'reposts': item['reposts']['count'] if item['reposts'] else None
+            }
 
-        def rqst_photo(input):
+        def rqst_size(input):
             photo = ''
             current = 0
             for size in input['sizes']:
@@ -203,17 +185,11 @@ def get_album(t_info, input_str, prefix):
             return photo
 
         for i, item in enumerate(json['items']):
-            photo = rqst_photo(item)
-            if photo:
-                dict_append(photo, 
-                            item['text'] if item['text'] else None, 
-                            item['date'] if 'date' in item else None,
-                            item['likes']['count'] if item['likes'] else None, 
-                            item['comments']['count'] if 'comments' in item else None,
-                            item['tags']['count'] if item['tags'] else None, 
-                            item['reposts']['count'] if item['reposts'] else None)
+            url = rqst_size(item)
+            if url:
+                dict_append(url, item)
             else:
-                log('w', f'missing item {i}: {item}')
+                logging.info(f'missing item {i}: {item}')
                 
             '''
             rip v5.67
@@ -245,22 +221,30 @@ def get_album(t_info, input_str, prefix):
         album_id = 'tagged'
         title = 'Фотографии с отметками '
     
-    if str_isminus(owner_id):
+    if '-' in owner_id:
         title += 'сообщества ' + t_info[0]['name']
     else:
         title += t_info[0]['first_name'] + ' ' + t_info[0]['last_name']
 
     album = rqst_method('photos.getAlbums', {'owner_id': owner_id, 'album_ids': album_id, 'need_system': 0})
 
-    if str_isminus(owner_id) and album == None:
+    if '-' in owner_id and album == None:
         title = t_info[0]['name']
     elif album_id not in ['wall', 'profile', 'saved', 'tagged']:
         if 'title' in album['items'][0]:
             title = album['items'][0]['title']    
             prefix += f'({str_cut(title)}) | '
 
-    photos = rqst_method('photos.getUserPhotos' if album_id == 'tagged' else 'photos.get', 
-                        {'owner_id': owner_id, 'album_id': album_id, 'count': '1000', 'extended': True, 'rev': 0})
+    photos = rqst_method(
+            'photos.getUserPhotos' if album_id == 'tagged' else 'photos.get', 
+            {
+                'owner_id': owner_id, 
+                'album_id': album_id, 
+                'count': '1000', 
+                'extended': True, 
+                'rev': 0
+            }
+        )
 
     progress_all = count = photos['count']
     progress_show = prefix + album_name
@@ -274,8 +258,17 @@ def get_album(t_info, input_str, prefix):
     else:
         offset_count = count // 1000 + 1
         for i in range(offset_count):
-            photos = rqst_method('photos.getUserPhotos' if album_id == 'tagged' else 'photos.get',
-                                {'owner_id': int(owner_id), 'album_id': album_id, 'offset': i * 1000, 'count': '1000', 'extended': True, 'rev': 0})
+            photos = rqst_method(
+                'photos.getUserPhotos' if album_id == 'tagged' else 'photos.get',
+                {
+                    'owner_id': int(owner_id), 
+                    'album_id': album_id,
+                    'offset': i * 1000, 
+                    'count': '1000', 
+                    'extended': True, 
+                    'rev': 0
+                }
+            )
 
             print(f'{progress_show}: ({offset_count} / {i + 1} / {len(photos["items"])})    ', end='\r')
             add_items(photos)
@@ -290,15 +283,15 @@ def get_album(t_info, input_str, prefix):
         saved = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         created = datetime.datetime.fromtimestamp(album['items'][0]['created']).strftime('%Y-%m-%d %H:%M:%S')
         updated = datetime.datetime.fromtimestamp(album['items'][0]['updated']).strftime('%Y-%m-%d %H:%M:%S')
-
-        description = 'id: %d\nthumb_id: %d\nowner_id: %d\ntitle: %s\ndescription: %s\ncreated: %s\nupdated: %s\nsaved: %s\nphotos: %d\n' % (
+        description = 'id: %d\nthumb_id: %d\nowner_id: %d\ntitle: %s\ndescription: %s\ncreated: %s\nupdated: %s\nsaved: %s\nphotos: %d\n' % `(
             album['items'][0]['id'],
             album['items'][0]['thumb_id'],
             album['items'][0]['owner_id'],
             album['items'][0]['title'],
             album['items'][0]['description'], 
             created, updated, saved,
-            album['items'][0]['size'])
+            album['items'][0]['size']
+        )
 
         with open(f'{album_name}_description.txt', 'w') as file:
             file.write(description)
@@ -309,9 +302,9 @@ def get_album(t_info, input_str, prefix):
         json.dump(images, file, indent=2, sort_keys=True)
 
     # generate file for aria2c
-    with open(f'{hash_prefix}_{album_name}_aria2c.txt', 'w') as file:
-        for i in range(len(images)):
-            file.write(f"{images[str(i)]['picture']}\n    out={rqst_filename(i, images[str(i)]['picture'])}\n")
+    #with open(f'{hash_prefix}_{album_name}_aria2c.txt', 'w') as file:
+    #    for i in range(len(images)):
+    #        file.write(f"{images[str(i)]['picture']}\n    out={rqst_filename(i, images[str(i)]['picture'])}\n")
         
     # start threads 
     if not options.simulate:
@@ -320,7 +313,7 @@ def get_album(t_info, input_str, prefix):
             threading.Thread(target=download_thread, args=[i, images, progress_show]).start()
 
         # waiting for end
-        while threading.activeCount() > 1:
+        while threading.active_count() > 1:
             time.sleep(0.01)
 
     # printing time and exit from dir
@@ -329,7 +322,7 @@ def get_album(t_info, input_str, prefix):
     os.chdir('..')
 
 def parse_link(i_work, num_seq=0, num_all=0, sw_steal=True): # input workstr, sequence str
-    log('i', f'in_link: {i_work}')
+    logging.info(f'in_link: {i_work}')
     # clean link
     if i_work[-6:] in ['?rev=1', '?rev=0']: i_work = i_work[:-6]
     if i_work[:+8] == 'https://': i_work = i_work[8:]
@@ -359,10 +352,10 @@ def parse_link(i_work, num_seq=0, num_all=0, sw_steal=True): # input workstr, se
         t_info = check_user
         t_name = t_info[0]['first_name'] + ' ' + t_info[0]['last_name']
     else:
-        log('e', 'invalid url: ' + i_work)
+        logging.info('invalid url: ' + i_work)
         return
 
-    log('i', f'target info: {t_name} ({t_work})')
+    logging.info(f'target info: {t_name} ({t_work})')
 
     # private page
     if t_info[0]['is_closed']:
@@ -371,7 +364,7 @@ def parse_link(i_work, num_seq=0, num_all=0, sw_steal=True): # input workstr, se
         elif 'can_access_closed' in t_info[0] and t_info[0]['can_access_closed']:
             pass
         else:
-            log('w', f'{t_name} closed')
+            logging.info(f'{t_name} closed')
             return
 
     # dump one album 2/2
@@ -380,7 +373,7 @@ def parse_link(i_work, num_seq=0, num_all=0, sw_steal=True): # input workstr, se
         return
 
     # steal albums 
-    if sw_steal and not str_isminus(t_work):
+    if sw_steal and '-' not in t_work:
         # from friends
         if options.steal_friends:
             friends = rqst_method('friends.get', {'user_id': t_work})
@@ -393,7 +386,7 @@ def parse_link(i_work, num_seq=0, num_all=0, sw_steal=True): # input workstr, se
             for i, item in enumerate(groups['items'], start=1):
                 parse_link(f'club{str(item)}', i, len(groups["items"]), False)
 
-    if str_isminus(t_work):
+    if '-' in t_work:
         directory = f'{str_cut(str_fix(check_group[0]["name"]), 100)} (-{check_group[0]["id"]})'
     else:
         directory = f'{str_cut(str_fix(check_user[0]["first_name"] + " " + check_user[0]["last_name"]), 100)} ({check_user[0]["id"]})'
@@ -403,18 +396,18 @@ def parse_link(i_work, num_seq=0, num_all=0, sw_steal=True): # input workstr, se
 
     # no access to albums
     if albums == False:
-        log('w', f'no access to albums')
+        logging.error(f'no access to albums')
         return
 
     os.makedirs(directory, exist_ok=True)
     os.chdir(directory)
 
     if albums == None: # public detected
-        log('w', 'group photos disabled, downloading only wall photos')
+        logging.warning('group photos disabled, downloading only wall photos')
         get_album(t_info, f'{t_work}_0', f'{t_name_prefix} 1 / 2 (profile) | ')
         get_album(t_info, f'{t_work}_00', f'{t_name_prefix} 2 / 2 (wall) | ')
     else:
-        if str_isminus(t_work):
+        if '-' in t_work:
             get_album(t_info, f'{t_work}_00', f'{t_name_prefix} 0 / {len(albums["items"])} (wall) | ')
 
         for i, item in enumerate(albums["items"], start=1):
@@ -434,7 +427,7 @@ def parse_link(i_work, num_seq=0, num_all=0, sw_steal=True): # input workstr, se
                 get_album(t_info, f'{t_work}_{str(item["id"])}', f'{t_name_prefix} {i} / {albums["count"]} ')
 
             else:
-                log('e', f'unexpected id: {item["id"]}') 
+                logging.error(f'unexpected id: {item["id"]}') 
                 
     os.chdir('..')
 
@@ -442,15 +435,16 @@ if __name__ == '__main__':
     parser = optparse.OptionParser()
     parser.add_option('-l', '--login', dest='login_info', default=login_info, help='Login info (token of login:pass)')
     parser.add_option('-t', '--threads', dest='threads_count', type=int, default='4', help='Number of threads')
-    parser.add_option('-d', '--debug', dest='show_warnings', action='store_true', help='Debug output (info messages)')
     parser.add_option('-r', '--rewrite',  dest='rewrite_files', action='store_true', help='Force rewriting pictures')
     parser.add_option('-f', '--steal-friends', dest='steal_friends', action='store_true', help='Steal pics from friends')
     parser.add_option('-g', '--steal-groups', dest='steal_groups', action='store_true', help='Steal pics from friends')
     parser.add_option('-s', '--simulate', dest='simulate', action='store_true', help='Simulate (not download, only json with urls)')
     options, arguments = parser.parse_args()
+    logging.basicConfig(level=logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
 
     if not options.login_info:
-        log('e', 'login info is empty')
+        logging.info('login info is empty')
         sys.exit()
     elif len(options.login_info) == 85:
         vk = VkApi(token=options.login_info, api_version='5.121')
@@ -466,10 +460,10 @@ if __name__ == '__main__':
             except AuthError as ex:
                 # idk
                 if 'vk_api@python273.pw' in str(ex):
-                    log('e', 'unknown catched, retrying...')
+                    logging.error('unknown catched, retrying...')
                     time.sleep(10)
                 else:
-                    log('e', 'autechre error: ' + str(ex))
+                    logging.error('autechre error: ' + str(ex))
                     sys.exit()
 
     #from vk_api.utils import enable_debug_mode

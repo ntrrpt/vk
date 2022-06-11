@@ -283,7 +283,7 @@ def get_album(t_info, input_str, prefix):
         saved = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         created = datetime.datetime.fromtimestamp(album['items'][0]['created']).strftime('%Y-%m-%d %H:%M:%S')
         updated = datetime.datetime.fromtimestamp(album['items'][0]['updated']).strftime('%Y-%m-%d %H:%M:%S')
-        description = 'id: %d\nthumb_id: %d\nowner_id: %d\ntitle: %s\ndescription: %s\ncreated: %s\nupdated: %s\nsaved: %s\nphotos: %d\n' % `(
+        description = 'id: %d\nthumb_id: %d\nowner_id: %d\ntitle: %s\ndescription: %s\ncreated: %s\nupdated: %s\nsaved: %s\nphotos: %d\n' % (
             album['items'][0]['id'],
             album['items'][0]['thumb_id'],
             album['items'][0]['owner_id'],

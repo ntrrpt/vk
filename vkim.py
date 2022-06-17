@@ -12,6 +12,7 @@ import datetime
 import shutil 
 import requests
 import ffmpeg
+from loguru import logger
 
 from vk_api import VkApi
 from vk_api import audio
@@ -23,28 +24,6 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
 prev_id = prev_date = offset_count = progress_left = 0
-
-def log(status, string, end_symbol='\n'):
-    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-
-    if status < 0: # verbose check
-        if not options.show_progress: 
-            return
-        else: 
-            status = abs(status)
-    if status == 1: 
-        color = '\33[90m' # info
-    if status == 2: 
-        color = '\033[31;1m' # error
-    if status == 3:
-        if not options.show_warnings: 
-            return
-        else: 
-            color = '\033[33;1m' # warn
-    if status == 4: 
-        color = '\033[32;1m' # pass
-
-    print(f'{color}[{timestamp}]\033[0m {string}', end=end_symbol)
 
 def text_append(dir, bin):
     with open(dir, 'a') as file:
@@ -61,10 +40,12 @@ def fix_val(number, digits):
     return f'{number:.{digits}f}'
 
 def str_toplus(string):
-    return str(abs(int(string)))
+    string = str(string)
+    return string[1:] if string[0] == '-' else string
 
 def str_tominus(string):
-    return str(-abs(int(string)))
+    string = str(string)
+    return '-' + string if string[0] != '-' else string
 
 def str_fix(string, letters = 100):
     return str_cut(re.sub(r'[/\\?%*\-\[\]{}:|"<>]', '', string), letters)
@@ -99,7 +80,7 @@ def rqst_thumb(input, th_w, th_h):
     try:
         image = Image.open(input).convert('RGB')
     except Exception:
-        log(3, f'{input} corrupted ')
+        logger.error(f'corrupted image {input}  ')
         return {'path': 'broken', 'height': 100, 'width': 100}
     
     src_w, src_h = image.size
@@ -118,24 +99,24 @@ def rqst_photo(input):
     current = 0
     for size in input['sizes']:
         if size['type'] == 'w':
-            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
+            photo = size
             break
         elif size['type'] == 's' and current < 1:
             current = 1
-            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
+            photo = size
         elif size['type'] == 'm' and current < 2:
             current = 2
-            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
+            photo = size
         elif size['type'] == 'x' and current < 3:
             current = 3
-            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
+            photo = size
         elif size['type'] == 'y' and current < 4:
             current = 4
-            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
+            photo = size
         elif size['type'] == 'z' and current < 5:
             current = 5
-            photo = {'url': size['url'], 'height': size['height'], 'width': size['width']}
-    return photo
+            photo = size
+    return {'url': photo['url'], 'height': photo['height'], 'width': photo['width']} 
 
 blocks_left = 0
 def rqst_m3u8(track, track_name):
@@ -149,11 +130,10 @@ def rqst_m3u8(track, track_name):
                     if request:
                         return request.content
                     else:
-                        log(-3, f'{dir} ({request.status_code})    ')
+                        logger.warning(f'{dir} ({request.status_code})')
                 break
             except Exception as ex:
-                # mostly its "Temporary failure in name resolution" error
-                log(3, f'{url}: {str(ex)}   ')
+                #log(3, f'{url}: {str(ex)}   ')
                 time.sleep(5)
 
     def get_decryptor(k_url):
@@ -193,12 +173,11 @@ def rqst_m3u8(track, track_name):
     desc = f'{str_fix(track["artist"], 50)} - {str_fix(track["title"], 50)}'
 
     if os.path.exists(track_name):
-        log(-1, f'{track_name} already exists, skipping.')
         return
 
     blocks = [b for b in rqst(track['url']).decode("utf-8").split("#EXT-X-KEY") if "#EXTINF" in b] # playlist
-    if not blocks: # бывает
-        log(-1, f'{track_name} internal error, skipping.')
+    if not blocks: # it happens
+        logger.error(f'{track_name} internal error, skipping.')
         return
 
     key_url = re.findall(r':METHOD=AES-128,URI="(\S*)"', blocks[0])[0]
@@ -209,19 +188,18 @@ def rqst_m3u8(track, track_name):
         threading.Thread(target=rqst_block, args=[i, blocks, key_url, get_decryptor(key_url)]).start()
 
     # waiting for end
-    while threading.activeCount() > 1:
-        log(-1, f'{track_name} {blocks_left}/{len(blocks)}', '\r')
-        time.sleep(0.01)
+    while threading.active_count() > 1:
+        logger.trace(f'{blocks_left}/{len(blocks)} {track_name}')
+        time.sleep(10)
 
-    log(-1, f'{track_name} merging...', '\r')
     if os.path.exists(f'{track["id"]}.tmp'):
         os.remove(f'{track["id"]}.tmp')
+
     with open(f'{track["id"]}.tmp', "ab") as out_file:
         for i in range(len(blocks)):
             with open(f'{track["id"]}-Frag{i}.ts', "rb") as in_file:
                 out_file.write(in_file.read())
 
-    log(-1, f'{track_name} converting...', '\r')
     (
         ffmpeg
         .input(f'{track["id"]}.tmp')
@@ -229,40 +207,42 @@ def rqst_m3u8(track, track_name):
         .run(quiet=True)
     )
 
-    log(-1, f'{track_name} {fix_val(os.path.getsize(track_name) / 1048576, 2)}MB          ')
-
     os.remove(f'{track["id"]}.tmp')
     for i in range(len(blocks)):
         os.remove(f'{track["id"]}-Frag{i}.ts')
 
+    logger.trace(f'{fix_val(os.path.getsize(track_name) / 1048576, 2)}MB {track_name}')
+
 def rqst_file(url, dir):
+    block_size = 1024
+
     if not url or (os.path.exists(dir) and not options.rewrite_files):
         return
-    log(-1, f'{dir}' , '\r')
+
+    if options.ignore_files:
+        text_append('aria.txt', f"{url}\n    out={dir}")
+        return
+
     while True:
         try:
             with requests.get(url, stream=True) as request:
                 if request:
-                    dw_len = int(request.headers.get('Content-Length', '0')) or 10000 #None
-                    block_size = 1024 #1 Kibibyte
+                    log_str = dir
+                    if os.path.splitext(dir)[1] not in ['.jpg', '.ogg']:
+                        dw_len = int(request.headers.get('Content-Length', '0')) or 10000
+                        log_str = f'{fix_val(dw_len / 1048576, 2)}MB {dir} '
+
+                    logger.trace(log_str)
 
                     with open(dir, 'wb', buffering = block_size) as file:
-                        fl_len = 0
                         for data in request.iter_content(chunk_size = block_size):
-                            fl_size = fix_val(fl_len / 1048576, 2)
-                            progress = float(math.ceil(fl_len / block_size) / math.ceil(dw_len / block_size))
-                            log(-1, f'{dir} {fl_size}MB {fix_val(progress * 100, 2)}%', '\r')
-                            fl_len += len(data)
                             file.write(data)
-
-                    log(-1, f'{dir} {fl_size}MB        ')
-                        
                 else:
-                    log(-3, f'{dir} ({request.status_code})    ')
-            break
+                    logger.error(f'({request.status_code}) {dir}')
+                break
         except Exception as ex:
-            # mostly its "Temporary failure in name resolution" error
-            log(3, f'{dir}: {str(ex)}   ')
+            # temporary failure catch
+            logger.warning(f'{url}: {str(ex)}   ')
             time.sleep(5)
 
 def rqst_user(user_id, save=True):
@@ -271,43 +251,44 @@ def rqst_user(user_id, save=True):
             return users[i]
 
     if user_id > 0:
-        object = rqst_method('users.get', {'user_ids': user_id, 'fields': 'photo_200'})[0]
-        object = {'id': user_id, 'photo': object['photo_200'], 'name': object['first_name'] + ' ' + object['last_name']}
+        user = rqst_method('users.get', {'user_ids': user_id, 'fields': 'photo_200'})[0]
+        user = {'id': user_id, 'photo': user['photo_200'], 'name': user['first_name'] + ' ' + user['last_name']}
     else:
-        object = rqst_method('groups.getById', {'group_id': str_toplus(user_id), 'fields': 'photo_200'})[0]
-        object = {'id': user_id, 'photo': object['photo_200'], 'name': object['name']}
+        user = rqst_method('groups.getById', {'group_id': str_toplus(user_id), 'fields': 'photo_200'})[0]
+        user = {'id': user_id, 'photo': user['photo_200'], 'name': user['name']}
 
     if save:
-        rqst_file(object['photo'], f'userpics/id{user_id}.jpg')
-        users[len(users)] = object
+        rqst_file(user['photo'], f'userpics/id{user_id}.jpg')
+        users[len(users)] = user
         
-    return object
+    return user
 
 def rqst_method(method, values={}):
     while True:
         try:
-            request = vk_session.method(method, values, raw=True)
-            return request['response']
+            request = vk_session.method(method, values)#, raw=True)
+            return request
+            #['response']
         except Exception as ex:
             ex_str = str(ex)
 
-            # invalid login/pass or some shit
+            # invalid login/pass
             if '[5] User authorization failed:' in ex_str:
-                log(2, 'autechre error: ' + ex_str[31:])
+                logger.error('autechre error: ' + ex_str[31:])
                 sys.exit()
 
             # invalid id
             if 'Invalid user id' in ex_str or 'group_ids is undefined' in ex_str:
                 return None
 
-            # occurs with frequent logins
+            # idk
             if 'Internal server error' in ex_str:
-                log(3, f'internal catched, waiting...   ')
-                time.sleep(60)
+                logger.warning(f'internal catched, waiting...   ')
+                time.sleep(100)
 
             else:
-                log(2, f'execption in \'{method}\': {ex_str}   ')
-                time.sleep(5)
+                logger.error(f'execption in \'{method}\': {ex_str}   ')
+                time.sleep(10)
 
 def rqst_message_service(input):
     goto_link = '<a href="#go_to_message%d" onclick="return GoToMessage(%d)" title="%s" style="color: #70777b">%s</a>'
@@ -375,7 +356,7 @@ def rqst_message_service(input):
             message = url_link % (us_prefix + str_toplus(from_id['id']), from_id['name']) + other_prefix + url_link % (us_postfix + str_toplus(passive['id']), passive['name'])
             
     if not message:
-        log(2, f'missing_service: {input}')
+        logger.error(f'missing_service: {input}')
 
     return f'\n<div class="message service" id="message{input["id"]}"><div class="body details">\n    {message}</div>\n</div>\n'
 
@@ -571,7 +552,7 @@ def rqst_attachments(input):
 
 
         if 'missing_attachment' in data_fragment:
-            log(2, f'missing_attachment: {a}')
+            logger.error(f'missing_attachment: {a}')
 
         if sw_joined:
             post_attachments += (
@@ -640,10 +621,9 @@ def rqst_message(input, forwarded=False):
                     '<div class="message default"></div>\n' if input["text"] != '' and forwarded and 'fwd_messages' not in input else '' + pre_attachments, 
                     post_attachments)
 
-def makehtml(filename, page, page_number, count, target, chat, const_offset_count):
+def makehtml(filename, page, count, target, chat, const_offset_count):
     global progress_left, offset_count
-    progress_ch = 0
-    for i in range(page_number):
+    for i in range(options.page_number):
         #empty check
         while True:
             chunk = rqst_method('messages.getHistory', {'peer_id': target, 'count': 200, 'extended': 1, 'offset': offset_count * 200})
@@ -652,30 +632,19 @@ def makehtml(filename, page, page_number, count, target, chat, const_offset_coun
             else:
                 offset_count -= 1
 
+        logger.info(
+           f'[{str_cut(str_fix(chat["title"]), 20)}] ' +
+           f'{fix_val((progress_left + 1) / count * 100, 1)}%  ' + # FIXME
+           f'{progress_left + 1}/{count}  ' +
+           f'u{len(users)} ' +
+           f'pg{page + 1}/{count // ( 200 * options.page_number ) + 1} ' +
+           f'pch{i + 1}/{options.page_number} ' +
+           f'mch{const_offset_count - offset_count}/{const_offset_count}'
+        )
+
         for msg in reversed(chunk['items']):
-            # progress drawing
-            progress = (progress_left + 1) / count
-            if isinstance(progress, int): progress = float(progress)
-            block = int(round(7 * progress))
-
-            if not options.show_progress or progress_ch != offset_count:
-                progress_ch = offset_count
-                log(1, f'[{str_cut(str_fix(chat["title"]), 20)}] '                                              
-                    f'[{"#" * block + "-" * (7 - block)}] '   
-                    f'[{fix_val(progress * 100, 1)}%] '                                                        
-                    f'[{progress_left + 1} / {count}] '    
-                    
-                    f'u{len(users)} '
-                    f'pg{page + 1}/{count // ( 200 * page_number ) + 1} ' 
-                    f'pch{i + 1}/{options.page_number} '  
-                    f'mch{const_offset_count - offset_count}/{const_offset_count}', '\n' if options.show_progress else '\r')                                                     # percentage
-
             #message request
-            if 'action' in msg:
-                text_append(filename, rqst_message_service(msg))
-            else:
-                text_append(filename, rqst_message(msg))
-
+            text_append(filename, rqst_message_service(msg) if 'action' in msg else rqst_message(msg))
             progress_left += 1
         offset_count -= 1
 
@@ -687,23 +656,44 @@ def makedump(target):
 
     # html header generation
     if target > 2e9:
-        request = rqst_method('messages.getChat', {'chat_id': target - int(2e9), 'fields': 'photo_200'})
-        chat = {'title': request['title'], 'photo': request['photo_200'] if 'photo_200' in request else 'https://vk.com/images/deactivated_200.png'}
+        request = rqst_method(
+            'messages.getChat', 
+            {
+                'chat_id': target - int(2e9),
+                'fields': 'photo_200'
+            }
+        )
+
+        chat = {
+            'title': request['title'], 
+            'photo': request['photo_200'] if 'photo_200' in request else 'https://vk.com/images/deactivated_200.png'
+        }
+
         admin = rqst_user(request['admin_id'], False)
-        info = (f'Название: {chat["title"]}\n'
-                f'Сохранено в: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
-                f'Сидящий: {me["first_name"]} {me["last_name"]} ({me["id"]})\n'
-                f'Админ: {admin["name"]} ({admin["id"]})\n'
-                f'Юзеров: {request["members_count"]}')
+
+        info = (
+            f'Название: {chat["title"]}\n'
+            f'Сохранено в: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
+            f'Сидящий: {me["first_name"]} {me["last_name"]} ({me["id"]})\n'
+            f'Админ: {admin["name"]} ({admin["id"]})\n'
+            f'Юзеров: {request["members_count"]}'
+        )
     else:
         request = rqst_user(target, False)
-        chat = {'title': request['name'], 'photo': request['photo']}
-        info = (f'Название: {chat["title"]}\n'
-                f'Сохранено в: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
-                f'Сидящий: {me["first_name"]} {me["last_name"]} ({me["id"]})')
+        
+        chat = {
+            'title': request['name'], 
+            'photo': request['photo']
+        }
+
+        info = (
+            f'Название: {chat["title"]}\n'
+            f'Сохранено в: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
+            f'Сидящий: {me["first_name"]} {me["last_name"]} ({me["id"]})'
+        )
 
     # directory preparation
-    work_dir = '%s (%s)' % (str_cut(str_fix(chat["title"]), 40, ''), str(target))
+    work_dir = f'{(str_cut(str_fix(chat["title"]), 40, ""))} ({target})'
 
     if not os.path.exists(work_dir):
         shutil.copytree('blank', work_dir)
@@ -722,7 +712,6 @@ def makedump(target):
     rqst_file(chat['photo'], 'userpics/main.jpg')
     
     # html page creation
-    progress_left = 0
     count = rqst_method('messages.getHistory', {'peer_id': target, 'count': 0})['count']
     const_offset_count = offset_count = count // 200 + 1
 
@@ -736,22 +725,21 @@ def makedump(target):
         # writing header
         text_append(filename, mainfile % ( str_esc(chat["title"]), info, str_esc(chat["title"]) ) )
 
-        # writing link to the previous page
-        if page != 0:
+        if page != 0: # writing link to the previous page
             text_append(filename, f'\n<a class="pagination block_link" href="messages{page}.html">Предыдущая страница ( {page} / {page_count} )</a>\n')
 
         # writing messages
-        makehtml(filename, page, options.page_number, count, target, chat, const_offset_count)
+        makehtml(filename, page, count, target, chat, const_offset_count)
         
-        # writing link to the next page
-        if page + 1 != page_count:
+        if page + 1 != page_count: # writing link to the next page
             text_append(filename, f'\n<a class="pagination block_link" href="messages{page + 2}.html">Cледующая страница ( {page + 2} / {page_count} )</a>\n')
 
         # writing (((eof)))
         text_append(filename, '\n            </div>\n        </div>\n    </div>\n</body>\n</html>')
         
+    end_time = fix_val(time.time() - start_time, 0)
+    logger.success(f'{chat["title"]} finished in {datetime.timedelta(seconds=int(end_time))}')
     os.chdir('..')
-    log(4, f'[{str_cut(str_fix(chat["title"]), 20)}] [{datetime.timedelta(seconds=int(fix_val(time.time() - start_time, 0)))}]')
 
 mainfile = (
         '<!DOCTYPE html>\n'
@@ -839,14 +827,34 @@ jnd_blank = (
 )
 
 if __name__ == "__main__":
+    # loguru init
+    logger.remove(0)
+    logger.add(
+        sys.stderr, 
+        backtrace = True, 
+        diagnose = True, 
+        format = "<level>[{time:HH:mm:ss}]</level> {message}", 
+        colorize = True,
+        level = 5
+    )
+
     def rqst_dialogs():
         conversations = []
         count = rqst_method('messages.getConversations', {'count': 0})['count']
+        
         for offset in range(count // 200 + 1):
-            chunk = rqst_method('messages.getConversations', {'count': 200, 'extended': 1, 'offset': offset * 200})
+            chunk = rqst_method(
+                'messages.getConversations', 
+                {
+                    'count': 200,
+                    'extended': 1,
+                    'offset': offset * 200
+                }
+            )
             for item in chunk['items']:
                 conversations.append(item['conversation']['peer']['id'])
-        log(1, 'loaded %s dialogs!' % len(conversations))
+
+        logger.info('loaded %s dialogs!' % len(conversations))
         return conversations
 
     parser = optparse.OptionParser()
@@ -859,14 +867,16 @@ if __name__ == "__main__":
     parser.add_option('--nodoc',        dest='skip_docs',       action='store_true', help='Don\'t save documents')
     parser.add_option('--nojson',       dest='skip_json',       action='store_true', help='Don\'t save json applications')
     parser.add_option('-a', '--noall',  dest='skip_all',        action='store_true', help='Don\'t save anything (except json)')
-
-    parser.add_option('-i', '--info',   dest='login_info', default='', help='Login info (token or login:pass)')
+    parser.add_option('-i', '--ignore', dest='ignore_files',    action='store_true', help='Ignore files and store links in aria2c file')
+    #TODO: thumb gen
+    parser.add_option('-l', '--login',   dest='login_info', default='', help='Login info (token or login:pass)')
     parser.add_option('-n', '--pagenum', dest='page_number', type=int, default='1000', help='Number of messages in one html file')
     parser.add_option('-r', '--rewrite', dest='rewrite_files', action='store_true', help='Force rewriting files')
     parser.add_option('-t', '--threads', dest='threads_count', type=int, default='5', help='Number of threads for m3u8 downloading')
 
-    parser.add_option('-w', '--show-warnings', dest='show_warnings', action='store_true', help='Show warnings')
-    parser.add_option('-v', '--show-progress',  dest='show_progress', action='store_true', help='Show progress info (verbose)')
+
+    #parser.add_option('-w', '--show-warnings', dest='show_warnings', action='store_true', help='Show warnings')
+    #parser.add_option('-v', '--show-progress',  dest='show_progress', action='store_true', help='Show progress info (verbose)')
 
     options, arguments = parser.parse_args()
 
@@ -897,20 +907,16 @@ if __name__ == "__main__":
                 break
             except AuthError as ex:
                 # idk lmao
-                if 'vk_api@python273.pw' in str(ex):
-                    log(2, f'unknown catched, retrying...   ')
-                    time.sleep(10)
-                else:
-                    log(2, 'autechre error: ' + str(ex))
-                    sys.exit()
+                logger.warning('autechre error: ' + str(ex))
+                sys.exit()
 
     elif len(options.login_info) == 85:
         vk_session = VkApi(token=options.login_info)
         conversations = rqst_dialogs()
-        log(1, 'token used, audio is not dumped')
+        logger.warning('token used, music will not dumped')
         options.skip_music = True
     else:
-        log(2, 'login info is empty')
+        logger.error('login info is empty!')
         sys.exit()
 
     if len(arguments):
@@ -941,18 +947,19 @@ if __name__ == "__main__":
                     work = str_toplus(check_user[0]['id'])
 
                 if work == None:
-                    log(2, f'{i} is invalid')
+                    logger.error(f'{i} is invalid')
                 else:
                     makedump(int(work))
     else: # no args = dump all
+        start_time = time.time()
+
         me = rqst_method('users.get')[0]
-        me_dir = 'Диалоги %s (%s)' % (str_fix(me['first_name'] + ' ' + me['last_name']), me['id'])
+        me_dir = f'Диалоги {str_fix(me["first_name"] + " " + me["last_name"])} ({me["id"]})'
         os.makedirs(me_dir, exist_ok=True)
         if not os.path.exists(f'{me_dir}/blank'):
             shutil.copytree('blank', f'{me_dir}/blank')
         os.chdir(me_dir)
-        start_time = time.time()
-
+        
         for i in range(len(conversations)):
             users = {}
             prev_id = 0
@@ -960,6 +967,7 @@ if __name__ == "__main__":
             makedump(conversations[i]) 
 
         end_time = fix_val(time.time() - start_time, 0)
-        log(4, f'all saved in: {datetime.timedelta(seconds=int(end_time))}')
+        logger.success(f'all saved in: {datetime.timedelta(seconds=int(end_time))}')
+
         shutil.rmtree('blank')
         sys.exit()

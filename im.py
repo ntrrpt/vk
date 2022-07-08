@@ -23,6 +23,8 @@ from PIL import Image
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
+import mus
+
 prev_id = prev_date = offset_count = progress_left = 0
 
 def text_append(dir, bin):
@@ -119,7 +121,7 @@ def rqst_photo(input):
     return {'url': photo['url'], 'height': photo['height'], 'width': photo['width']} 
 
 blocks_left = 0
-def rqst_m3u8(track, track_name):
+def dep_rqst_m3u8(track, track_name):
     # Zerogoki00/vk-audio-downloader
     global blocks_left
 
@@ -266,9 +268,8 @@ def rqst_user(user_id, save=True):
 def rqst_method(method, values={}):
     while True:
         try:
-            request = vk_session.method(method, values)#, raw=True)
+            request = vk_session.method(method, values)
             return request
-            #['response']
         except Exception as ex:
             ex_str = str(ex)
 
@@ -301,13 +302,22 @@ def rqst_message_service(input):
     message = ''
 
     if type == 'chat_create':
-        message = url_link % (from_prefix + str_toplus(from_id['id']), from_id['name']) + f' создал беседу «{input["action"]["text"]}»'
+        message = url_link % (
+            from_prefix + str_toplus(from_id['id']), 
+            from_id['name']
+        ) + f' создал беседу «{input["action"]["text"]}»'
 
     if type == 'chat_title_update':
-        message = url_link % (from_prefix + str_toplus(from_id['id']), from_id['name']) + f' изменил название беседы на «{input["action"]["text"]}»'
+        message = url_link % (
+            from_prefix + str_toplus(from_id['id']), 
+            from_id['name']
+        ) + f' изменил название беседы на «{input["action"]["text"]}»'
  
     if type == 'chat_invite_user_by_link':
-        message = url_link % (from_prefix + str(from_id['id']), from_id['name']) + ' присоединился к беседе по ссылке'
+        message = url_link % (
+            from_prefix + str(from_id['id']),
+            from_id['name']
+        ) + ' присоединился к беседе по ссылке'
 
     if type == 'chat_photo_update':
         rqst_file(rqst_photo(input['attachments'][0]['photo'])['url'], f'userpics/up{input["conversation_message_id"]}.jpg')
@@ -336,7 +346,12 @@ def rqst_message_service(input):
                 input['action']['message'],
                 f'«{input["action"]["message"]}»')
         else:
-            message += goto_link % (input['action']["conversation_message_id"], input['action']["conversation_message_id"], '', 'сообщение')
+            message += goto_link % (
+                input['action']["conversation_message_id"], 
+                input['action']["conversation_message_id"], 
+                '', 
+                'сообщение'
+            )
 
     if type in ['chat_invite_user', 'chat_kick_user']:
         us_prefix = 'https://vk.com/id' if input['from_id'] > 0 else 'https://vk.com/club'
@@ -395,29 +410,39 @@ def rqst_attachments(input):
 
         if type == 'wall':
             href = f'https://vk.com/wall{a["wall"]["to_id"]}_{a["wall"]["id"]}'
-            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{href}">', 
-                                          'Запись', 
-                                          href)
+            data_fragment = data_blank % (
+                f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{href}">', 
+                'Запись', 
+                href
+            )
 
         if type == 'poll':
-            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="https://vk.com/poll{a["poll"]["owner_id"]}_{a["poll"]["id"]}">', 
-                                          'Опрос', 
-                                          f'id{a["poll"]["question"]}')
+            data_fragment = data_blank % (
+                f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="https://vk.com/poll{a["poll"]["owner_id"]}_{a["poll"]["id"]}">', 
+                'Опрос', 
+                f'id{a["poll"]["question"]}'
+            )
 
         if type == 'gift':
-            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{a["gift"]["thumb_256"]}">', 
-                                          'Подарок', 
-                                          f'id{a["gift"]["id"]}')
+            data_fragment = data_blank % (
+                f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{a["gift"]["thumb_256"]}">', 
+                'Подарок', 
+                f'id{a["gift"]["id"]}'
+            )
 
         if type == 'link':
-            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{a["link"]["url"]}">', 
-                                          a['link']['title'], 
-                                          a['link']['caption'] if 'caption' in a['link'] else '')
+            data_fragment = data_blank % (
+                f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{a["link"]["url"]}">', 
+                a['link']['title'], 
+                a['link']['caption'] if 'caption' in a['link'] else ''
+            )
 
         if type == 'market':
-            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_invoice" {json_fragment} href="https://vk.com/market{a["market"]["owner_id"]}_{a["market"]["id"]}">', 
-                                          a['market']['title'], 
-                                          a['market']['price']['text']) 
+            data_fragment = data_blank % (
+                f'<a class="media clearfix pull_left block_link media_invoice" {json_fragment} href="https://vk.com/market{a["market"]["owner_id"]}_{a["market"]["id"]}">', 
+                a['market']['title'], 
+                a['market']['price']['text']
+            ) 
 
         if type == 'wall_reply':
             if 'deleted' in a['wall_reply']:
@@ -427,7 +452,11 @@ def rqst_attachments(input):
                 html_title = 'Комментарий к записи'
                 href = f'https://vk.com/wall{a["wall_reply"]["owner_id"]}_{a["wall_reply"]["post_id"]}?reply={a["wall_reply"]["id"]}'
 
-            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{href}">', html_title, href)
+            data_fragment = data_blank % (
+                f'<a class="media clearfix pull_left block_link media_game" {json_fragment} href="{href}">', 
+                html_title, 
+                href
+            )
 
         if type == 'doc':
             namefile = str_fix(str_cut(a['doc']['title'], 80, ''))
@@ -440,15 +469,19 @@ def rqst_attachments(input):
                 href = f'docs/{namefile}-{i}-{input["conversation_message_id"]}_{human_date}.{a["doc"]["ext"]}'
                 rqst_file(a['doc']['url'], href)
                 
-            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_file" {json_fragment} href="{href}">', 
-                                          namefile + '.' + a['doc']['ext'], 
-                                          f'{sizeof_fmt(a["doc"]["size"])} ({a["doc"]["owner_id"]}_{a["doc"]["id"]})')
+            data_fragment = data_blank % (
+                f'<a class="media clearfix pull_left block_link media_file" {json_fragment} href="{href}">', 
+                namefile + '.' + a['doc']['ext'], 
+                f'{sizeof_fmt(a["doc"]["size"])} ({a["doc"]["owner_id"]}_{a["doc"]["id"]})'
+            )
 
         if type == 'video':
-            # todo: yt-dl?
-            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_video" {json_fragment} href="https://vk.com/video{a["video"]["owner_id"]}_{a["video"]["id"]}">', 
-                                          f'{a["video"]["title"]}', 
-                                          f'{datetime.timedelta(seconds=int(a["video"]["duration"]))} | {a["video"]["owner_id"]}_{a["video"]["id"]}')
+            # todo: yt-dlp?
+            data_fragment = data_blank % (
+                f'<a class="media clearfix pull_left block_link media_video" {json_fragment} href="https://vk.com/video{a["video"]["owner_id"]}_{a["video"]["id"]}">', 
+                f'{a["video"]["title"]}', 
+                f'{datetime.timedelta(seconds=int(a["video"]["duration"]))} | {a["video"]["owner_id"]}_{a["video"]["id"]}'
+            )
 
         if type == 'audio':
             audio_name = str_fix(str_cut(f'{a["audio"]["artist"]} - {a["audio"]["title"]} ({a["audio"]["owner_id"]}_{a["audio"]["id"]})', 80, ''))
@@ -462,17 +495,19 @@ def rqst_attachments(input):
                 else:
                     audio = vk_audio.get_audio_by_id(a["audio"]["owner_id"], a["audio"]["id"])
                     if 'mp3' in audio['url']:
-                        rqst_file(audio['url'], href)
+                        vmd.rqst_mp3(audio, href)
                     elif 'm3u8' in audio['url']:
-                        rqst_m3u8(audio, href)
+                        vmd.rqst_m3u8(audio, href)
                     else:
                         assert False
             except (StopIteration, ValueError, AssertionError):
                 href = f'https://m.vk.com/audio{a["audio"]["owner_id"]}_{a["audio"]["id"]}'
                 
-            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_audio_file" {json_fragment} href="{href}">', 
-                                        audio_name, 
-                                        f'{datetime.timedelta(seconds=int(a["audio"]["duration"]))} | {a["audio"]["owner_id"]}_{a["audio"]["id"]} ')
+            data_fragment = data_blank % (
+                f'<a class="media clearfix pull_left block_link media_audio_file" {json_fragment} href="{href}">', 
+                audio_name, 
+                f'{datetime.timedelta(seconds=int(a["audio"]["duration"]))} | {a["audio"]["owner_id"]}_{a["audio"]["id"]} '
+            )
         
         if type == 'call':
             html_title = 'Исходящий ' if input['from_id'] == a['call']['initiator_id'] else 'Входящий '
@@ -485,18 +520,22 @@ def rqst_attachments(input):
             if a['call']['state'] == 'reached':
                 html_details = f'Завершен ({datetime.timedelta(seconds=int(a["call"]["duration"]))})'
 
-            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_call" {json_fragment}>', 
-                                            html_title, 
-                                            html_details)
+            data_fragment = data_blank % (
+                f'<a class="media clearfix pull_left block_link media_call" {json_fragment}>', 
+                html_title, 
+                html_details
+            )
 
         if type == 'graffiti':
             height = a["graffiti"]["height"]
             width = a["graffiti"]["width"]
 
             if options.skip_graffiti:
-                data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{a["graffiti"]["url"]}">', 
-                                              'Граффити', 
-                                              f'{height}x{width}')
+                data_fragment = data_blank % (
+                    f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{a["graffiti"]["url"]}">', 
+                    'Граффити', 
+                    f'{height}x{width}'
+                )
             else:
                 namefile = f'graffiti-{input["conversation_message_id"]}-{i}_{human_date}.jpg'
                 rqst_file(a["graffiti"]['url'], 'photos/' + namefile)
@@ -515,15 +554,19 @@ def rqst_attachments(input):
                 href = f'voice_messages/audio-{i}-{input["conversation_message_id"]}_{human_date}.ogg'
                 rqst_file(a['audio_message']['link_ogg'], href)
 
-            data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_voice_message" {json_fragment} href="{href}">', 
-                                          'Голосовое сообщение', 
-                                          datetime.timedelta(seconds=int(a["audio_message"]["duration"])))
+            data_fragment = data_blank % (
+                f'<a class="media clearfix pull_left block_link media_voice_message" {json_fragment} href="{href}">', 
+                'Голосовое сообщение', 
+                datetime.timedelta(seconds=int(a["audio_message"]["duration"]))
+            )
 
         if type == 'sticker':
             if options.skip_stickers:
-                data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{a["sticker"]["images"][1]["url"]}">', 
-                                              'Стикер', 
-                                              f'id{a["sticker"]["sticker_id"]}')
+                data_fragment = data_blank % (
+                    f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{a["sticker"]["images"][1]["url"]}">', 
+                    'Стикер', 
+                    f'id{a["sticker"]["sticker_id"]}'
+                )
             else:
                 rqst_file(a['sticker']['images'][1]['url'], f'userpics/st{a["sticker"]["sticker_id"]}.jpg')
                 
@@ -536,9 +579,11 @@ def rqst_attachments(input):
             photo = rqst_photo(a['photo'])
 
             if options.skip_photos:
-                data_fragment = data_blank % (f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{photo["url"]}">', 
-                                              'Фото',
-                                              f'{photo["height"]}x{photo["width"]}')
+                data_fragment = data_blank % (
+                    f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{photo["url"]}">', 
+                    'Фото',
+                    f'{photo["height"]}x{photo["width"]}'
+                )
             else:
                 photo_date = datetime.datetime.fromtimestamp(a['photo']['date']).strftime('%y-%m-%d_%H-%M-%S')
                 namefile = f'ph-{input["conversation_message_id"]}-{i}_{photo_date}.jpg'
@@ -612,14 +657,16 @@ def rqst_message(input, forwarded=False):
         prev_id = from_id['id']
         blank = def_blank
 
-    return blank % (input["conversation_message_id"], 
-                    from_id["id"], from_id["id"],
-                    sender if forwarded else date, 
-                    date if forwarded else sender, 
-                    fwd_messages,
-                    str_esc(input["text"], True),
-                    '<div class="message default"></div>\n' if input["text"] != '' and forwarded and 'fwd_messages' not in input else '' + pre_attachments, 
-                    post_attachments)
+    return blank % (
+        input["conversation_message_id"], 
+        from_id["id"], from_id["id"],
+        sender if forwarded else date, 
+        date if forwarded else sender, 
+        fwd_messages,
+        str_esc(input["text"], True),
+        '<div class="message default"></div>\n' if input["text"] != '' and forwarded and 'fwd_messages' not in input else '' + pre_attachments, 
+        post_attachments
+    )
 
 def makehtml(filename, page, count, target, chat, const_offset_count):
     global progress_left, offset_count
@@ -874,10 +921,6 @@ if __name__ == "__main__":
     parser.add_option('-r', '--rewrite', dest='rewrite_files', action='store_true', help='Force rewriting files')
     parser.add_option('-t', '--threads', dest='threads_count', type=int, default='5', help='Number of threads for m3u8 downloading')
 
-
-    #parser.add_option('-w', '--show-warnings', dest='show_warnings', action='store_true', help='Show warnings')
-    #parser.add_option('-v', '--show-progress',  dest='show_progress', action='store_true', help='Show progress info (verbose)')
-
     options, arguments = parser.parse_args()
 
     if options.skip_all:    
@@ -891,6 +934,9 @@ if __name__ == "__main__":
     options.page_number = int(options.page_number) // 200 + 1
 
     conversations = []
+
+    if not options.login_info:
+        options.login_info = f'{input("Login: ")}:{input("Pass: ")}'
 
     if ':' in options.login_info:
         lp = options.login_info.split(':')
@@ -916,7 +962,7 @@ if __name__ == "__main__":
         logger.warning('token used, music will not dumped')
         options.skip_music = True
     else:
-        logger.error('login info is empty!')
+        logger.error('login info is invalid!')
         sys.exit()
 
     if len(arguments):

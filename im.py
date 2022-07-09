@@ -400,9 +400,9 @@ def rqst_attachments(input):
                 else:
                     audio = vk_audio.get_audio_by_id(a["audio"]["owner_id"], a["audio"]["id"])
                     if 'mp3' in audio['url']:
-                        vmd.rqst_mp3(audio, href)
+                        mus.rqst_mp3(audio, href)
                     elif 'm3u8' in audio['url']:
-                        vmd.rqst_m3u8(audio, href)
+                        mus.rqst_m3u8(audio, href)
                     else:
                         assert False
             except (StopIteration, ValueError, AssertionError):

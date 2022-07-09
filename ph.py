@@ -66,12 +66,12 @@ def rqst_method(method, values={}):
 
             # invalid id / no albums in group
             elif re.findall('\[100\]|\[113\]|group photos are disabled', ex_str):
-                logger.error(f'no id / no albums: {values}, {str(ex)}')
+                logger.warning(f'no id / no albums: {values}, {str(ex)}')
                 return None
 
             # no access to albums
             elif re.findall('\[18\]|\[30\]|\[15\]|\[200\]', ex_str):
-                logger.error(f'no access: {values}, {str(ex)}')
+                logger.warning(f'no access: {values}, {str(ex)}')
                 return False
 
             # occurs with frequent requests
@@ -83,7 +83,7 @@ def rqst_method(method, values={}):
                 logger.error(f'\'{method}\': {ex_str}')
                 time.sleep(5)
 
-def rqst_imgfile(i, img):
+def rqst_imgfile(i, img, _dir):
     #i, img, progress_show = input
     def is_exist(filename, dir): # what
         if filename in dir:
@@ -93,8 +93,6 @@ def rqst_imgfile(i, img):
                 return True
         return False
     
-    text = img['text']
-    date = img['date']
     filename = rqst_filename(img['url'], i)
     output = None
     ret_str = None
@@ -102,7 +100,7 @@ def rqst_imgfile(i, img):
     #comments = images[str(i)]['comments'] 
     #tags = images[str(i)]['tags']
     #reposts = images[str(i)]['reposts']
-    if not is_exist(filename, os.listdir()) or options.rewrite_files: 
+    if not is_exist(filename, _dir) or options.rewrite_files: 
         while True:
             try:
                 with requests.get(img['url'], stream=True) as request:
@@ -129,7 +127,7 @@ def rqst_imgfile(i, img):
                 if img['date']:
                     os.utime(filename, (img['date'], img['date']))
 
-    elif is_exist(filename, os.listdir()) and img['date']:
+    elif img['date']:
         os.utime(filename, (img['date'], img['date']))
 
         if img['text']:
@@ -322,9 +320,10 @@ def get_album(t_info, input_str, prefix):
 
     # start threads 
     if not options.simulate:
+        _dir = os.listdir()
         with concurrent.futures.ThreadPoolExecutor(max_workers=options.threads_count) as exector: 
             future_to_img = {
-                exector.submit(rqst_imgfile, k, img): (k, img) for i, (k, img) in enumerate(img_dict.items()) 
+                exector.submit(rqst_imgfile, k, img, _dir): (k, img) for i, (k, img) in enumerate(img_dict.items()) 
             }
             finished = 0
 
@@ -336,10 +335,6 @@ def get_album(t_info, input_str, prefix):
                     logger.error(ret)
 
                 progress_upd(count, finished, progress_show)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=options.threads_count) as exector: 
-            exector.map(rqst_imgfile, [(k, img, progress_show) for i, (k, img) in enumerate(img_dict.items())])
-            exector.shutdown(wait=True) # wait for all complete
 
     # printing time and exit from dir
     end_time = val_fix(time.time() - start_time, 0)
@@ -464,7 +459,7 @@ if __name__ == '__main__':
         diagnose = True, 
         format = "<level>[{time:HH:mm:ss}]</level> {message}", 
         colorize = True,
-        level = 5
+        level = 40
     )
 
     parser = optparse.OptionParser()

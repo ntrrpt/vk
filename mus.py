@@ -258,7 +258,7 @@ if __name__ == '__main__':
         os.makedirs(path, exist_ok=True)
         os.chdir(path)
         
-        for track in vk_audio.get_iter(owner_id = album['owner_id'], lbum_id = album['id'], access_hash = album['access_hash']):
+        for track in vk_audio.get_iter(owner_id = album['owner_id'], album_id = album['id'], access_hash = album['access_hash']):
             if 'm3u8' in track['url']:
                 rqst_m3u8(track)
             elif 'mp3' in track['url']:

@@ -135,27 +135,6 @@ def rqst_imgfile(i, img, _dir):
 
     return ret_str
 
-def get_json(filename):
-    start_time = time.time()
-    with open(filename) as file:
-        i_json = json.load(file)
-
-    global progress_all, progress_left
-    progress_all = len(i_json)
-    progress_left = 0
-
-    # start threads
-    for i in range(options.threads_count):
-        threading.Thread(target=download_thread, args=[i, i_json, filename]).start()
-
-    # waiting for end
-    while threading.active_count() > 1:
-        time.sleep(0.01)
-
-    # printing time and exit from dir
-    end_time = val_fix(time.time() - start_time, 0)
-    print(f'{filename}: [{datetime.timedelta(seconds=int(end_time))}]')
-
 def get_album(t_info, input_str, prefix):
     def add_items(json):
         def dict_append(url, item):
@@ -230,9 +209,9 @@ def get_album(t_info, input_str, prefix):
         title = 'Фотографии с отметками '
     
     if '-' in owner_id:
-        title += 'сообщества ' + t_info[0]['name']
+        title += f"сообщества {t_info[0]['name']}"
     else:
-        title += t_info[0]['first_name'] + ' ' + t_info[0]['last_name']
+        title += f"{t_info[0]['first_name']} {t_info[0]['last_name']}"
 
     album = rqst_method('photos.getAlbums', {'owner_id': owner_id, 'album_ids': album_id, 'need_system': 0})
 
@@ -266,6 +245,10 @@ def get_album(t_info, input_str, prefix):
     else:
         offset_count = count // 1000 + 1
         for i in range(offset_count):
+            for t in reversed(range(1, options.requests_delay, 1)):
+                print(f'{progress_show}: ({offset_count} / {i + 1} / {len(photos["items"])} / {t})    ', end='\r')
+                time.sleep(1)
+
             photos = rqst_method(
                 'photos.getUserPhotos' if album_id == 'tagged' else 'photos.get',
                 {
@@ -277,8 +260,6 @@ def get_album(t_info, input_str, prefix):
                     'rev': 0
                 }
             )
-
-            print(f'{progress_show}: ({offset_count} / {i + 1} / {len(photos["items"])})    ', end='\r')
             add_items(photos)
 
     # creating folders
@@ -315,7 +296,7 @@ def get_album(t_info, input_str, prefix):
 
     # saving json with images
     hash_prefix = hashlib.md5(str(img_dict).encode('utf-8')).hexdigest()[:10]
-    with open(f'{hash_prefix}_{album_name}_list.txt', 'w') as file:
+    with open(f'{hash_prefix}_{album_name}_list.json', 'w') as file:
         json.dump(img_dict, file, indent=2, sort_keys=True)
 
     # start threads 
@@ -469,12 +450,64 @@ if __name__ == '__main__':
     parser.add_option('-f', '--steal-friends', dest='steal_friends', action='store_true', help='Steal pics from friends')
     parser.add_option('-g', '--steal-groups', dest='steal_groups', action='store_true', help='Steal pics from friends')
     parser.add_option('-s', '--simulate', dest='simulate', action='store_true', help='Simulate (not download, only json with urls)')
+    parser.add_option('-d', '--delay', dest='requests_delay', type=int, default='15', help='Delay between chunks requests (in seconds)')
+    parser.add_option('-j', '--json', dest='conv_json', action='store_true', help='album.json parsing')
     options, arguments = parser.parse_args()
 
+    if options.conv_json:
+        def rqst_json(filename):
+            with open(filename) as file:
+                try:
+                    img_dict = json.load(file)
+                except Exception as ex:
+                    return
+
+                start_time = time.time()
+                _dir = os.listdir()
+
+                global progress_all, progress_left
+                progress_all = len(img_dict)
+                progress_left = 0
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=options.threads_count) as exector: 
+                    future_to_img = {
+                        exector.submit(rqst_imgfile, k, img, _dir): (k, img) for i, (k, img) in enumerate(img_dict.items()) 
+                    }
+                    finished = 0
+
+                    for future in concurrent.futures.as_completed(future_to_img):
+                        finished += 1
+
+                        ret = future.result()
+                        if ret:
+                            logger.error(ret)
+
+                        progress_upd(progress_all, finished, filename)
+                                                
+                end_time = val_fix(time.time() - start_time, 0)
+                print(f'{filename}: [{datetime.timedelta(seconds=int(end_time))}] ({progress_all} / {progress_all})')
+
+        def scan_folders():
+            for item in os.listdir():
+                if os.path.isdir(item):
+                    os.chdir(item)
+                    scan_folders()
+                    os.chdir('..')
+                elif os.path.splitext(item)[1] == '.json': # txt
+                    rqst_json(item)
+
+        if arguments:
+            for arg in arguments: 
+                rqst_json(arg)
+        else:
+            scan_folders()
+
+        sys.exit()
+            
     if not options.login_info:
         options.login_info = f'{input("Login: ")}:{input("Pass: ")}'
 
-    if len(options.login_info) == 85:
+    if len(options.login_info) >= 85:
         vk = VkApi(token=options.login_info, api_version='5.121')
     elif ':' in options.login_info:
         lp = options.login_info.split(':')
@@ -501,7 +534,4 @@ if __name__ == '__main__':
         arguments.append(f'id{rqst_method("users.get")[0]["id"]}')
 
     for i, arg in enumerate(arguments, start=1):
-        if os.path.exists(arg):
-            get_json(arg)
-        else:
-            parse_link(arg, i, len(arguments))
+        parse_link(arg, i, len(arguments))

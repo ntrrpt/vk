@@ -857,11 +857,10 @@ if __name__ == "__main__":
 
                 break
             except AuthError as ex:
-                # idk lmao
                 logger.warning('autechre error: ' + str(ex))
                 sys.exit()
 
-    elif len(options.login_info) == 85:
+    elif len(options.login_info) >= 85:
         vk_session = VkApi(token=options.login_info)
         conversations = rqst_dialogs()
         logger.warning('token used, music will not dumped')

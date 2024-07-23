@@ -24,8 +24,6 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
 import mus
-import copy
-import schedule
 
 prev_id = prev_date = offset_count = items_done = 0
 progress_str = ''

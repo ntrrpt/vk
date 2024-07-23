@@ -68,17 +68,10 @@ def rqst_method(method, values={}):
                 time.sleep(10)
 
 def rqst_str(url):
-    while True:
-        try:
-            with requests.get(url, headers={"Accept-Encoding": "identity"}) as request:
-                if request:
-                    return request.content
-                else:
-                    logger.warning(f'{url} ({request.status_code})')
-            break
-        except Exception as ex:
-            logger.warning(f'{url} ({str(ex)})')
-            time.sleep(5)
+    with requests.get(url, headers={"Accept-Encoding": "identity"}) as request:
+        if request:
+            return request.content
+        logger.warning(f'{url} ({request.status_code})')
 
 def rqst_mp3(track, final_name=''):
     block_size = 1024 # 1 Kibibyte
@@ -138,7 +131,12 @@ def rqst_mp3(track, final_name=''):
 def rqst_m3u8(track, final_name=''):
     def rqst_decryptor(k_url):
         k = rqst_str(k_url)
-        c = Cipher(algorithms.AES(k), modes.CBC(b'\x00' * 16), backend=default_backend())
+        c = Cipher(
+            algorithms.AES(k), 
+            modes.CBC(b'\x00' * 16), 
+            backend=default_backend()
+        )
+
         return c.decryptor()
 
     def rqst_block(block, key_url):
@@ -287,8 +285,7 @@ if __name__ == '__main__':
     options, arguments = parser.parse_args()
 
     m3u8_threads = options.m3u8_threads
-
-    if ':' not in options.login_info:
+    if ":" not in options.login_info:
         options.login_info = f'{input("Login: ")}:{input("Pass: ")}'
 
     lp = options.login_info.split(':')
@@ -299,7 +296,7 @@ if __name__ == '__main__':
         vk_audio = audio.VkAudio(vk_session)
         logger.info('login success')
     except AuthError as ex:
-        log('autechre error: ' + str(ex), 1)
+        logger.error('autechre error: ' + str(ex), 1)
         sys.exit()
 
     if not arguments:

@@ -1,47 +1,49 @@
 #!/usr/bin/env python3
+from datetime import datetime, timedelta
 import sys
 import json
 import time
 import random
 import optparse
-import threading
-import math
 import os
 import re
-import datetime, pathlib
-import shutil, contextlib
+import pathlib
+import shutil
 import requests
-import ffmpeg, multiprocessing
-from loguru import logger
 
-from vk_api import VkApi
-from vk_api import audio
-from vk_api.exceptions import AuthError, VkApiError
+from utils import sizeof_fmt
+from utils import html_fmt
+from utils import fix_val
+from utils import str_toplus
+from utils import str_tominus
+from utils import str_fix
+from utils import str_cut
+from utils import text_append
 
+import mu
 from PIL import Image
-
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
-
-import mus
+from loguru import logger as log
+from vk_api import VkApi, audio
+from vk_api.exceptions import AuthError
+tr, warn, inf, err, ok = (log.trace, log.warning, log.info, log.error, log.success)
 
 prev_id = prev_date = offset_count = items_done = 0
 progress_str = ''
 
 parser = optparse.OptionParser()
-parser.add_option('--novoice',      dest='skip_voices',     action='store_true', help='Don\'t save voice messages')
-parser.add_option('--nomusic',      dest='skip_music',      action='store_true', help='Don\'t save music files')
-parser.add_option('--nophoto',      dest='skip_photos',     action='store_true', help='Don\'t save pictures')
-parser.add_option('--nograffiti',   dest='skip_graffiti',   action='store_true', help='Don\'t save graffiti')
-parser.add_option('--nostickers',   dest='skip_stickers',   action='store_true', help='Don\'t save stickers')
-parser.add_option('--nodoc',        dest='skip_docs',       action='store_true', help='Don\'t save documents')
-parser.add_option('--nojson',       dest='skip_json',       action='store_true', help='Don\'t save json applications')
-parser.add_option('-a', '--noall',  dest='skip_all',        action='store_true', help='Don\'t save anything (except json)')
-parser.add_option('-l', '--login',   dest='login_info', default='', help='Login info (token or login:pass)')
-parser.add_option('-n', '--pagenum', dest='page_number', type=int, default='1000', help='Number of messages in one html file')
-parser.add_option('-r', '--rewrite', dest='rewrite_files', action='store_true', help='Force rewriting files')
-parser.add_option('-t', '--threads', dest='threads_count', type=int, default='5', help='Number of threads for m3u8 downloading')
-parser.add_option('-v', '--verbse', dest='verbose', action='store_true', help='Verbose logging')
+parser.add_option('--novoice',      dest='skip_voices',     action='store_true', help='don\'t save voice messages')
+parser.add_option('--nomusic',      dest='skip_music',      action='store_true', help='don\'t save music files')
+parser.add_option('--nophoto',      dest='skip_photos',     action='store_true', help='don\'t save pictures')
+parser.add_option('--nograffiti',   dest='skip_graffiti',   action='store_true', help='don\'t save graffiti')
+parser.add_option('--nostickers',   dest='skip_stickers',   action='store_true', help='don\'t save stickers')
+parser.add_option('--nodoc',        dest='skip_docs',       action='store_true', help='don\'t save documents')
+parser.add_option('--nojson',       dest='skip_json',       action='store_true', help='don\'t save json applications')
+parser.add_option('-a', '--noall',  dest='skip_all',        action='store_true', help='don\'t save anything (except json)')
+parser.add_option('-l', '--login',   dest='login_info', default='', help='login info (token or login:pass)')
+parser.add_option('-n', '--pagenum', dest='page_number', type=int, default='1000', help='number of messages in one html file')
+parser.add_option('-r', '--rewrite', dest='rewrite_files', action='store_true', help='force rewriting files')
+parser.add_option('-t', '--threads', dest='threads_count', type=int, default='5', help='number of threads for m3u8 downloading')
+parser.add_option('-v', '--verbose', dest='verbose', action='store_true', help='verbose logging to file')
 options, arguments = parser.parse_args()
 
 if options.skip_all:
@@ -54,93 +56,99 @@ if options.skip_all:
 
 options.page_number = int(options.page_number) // 200 + 1
 
-def text_append(dir, bin):
-    with open(dir, 'a') as file:
-        file.write(bin + '\n')
-
-def progress(str):
-    if options.verbose:
-        logger.info(str)
-    else:
-        print(" " * os.get_terminal_size().columns, end = '\r')
-        print(str , end = '\r')
-
-def rqst_file(url, dir):
-    block_size = 1024
-
-    if not url or (os.path.exists(dir) and not options.rewrite_files):
+def progress(string, force=False):
+    if not force and options.verbose:
+        inf(string)
         return
 
+    print(" " * os.get_terminal_size().columns, end = '\r')
+    print(string , end = '\r')
+
+def rqst_file(url, path):
+    if not url:
+        return
+
+    #TODO: bytes mismatch detection
+    if os.path.exists(path) and not options.rewrite_files:
+        return
+
+    block_size = 1024
+    dw_total = 0
     with requests.get(url, stream=True, timeout=10) as request:
         if not request:
-            logger.error(f'({request.status_code}) {dir}')
-        else:
-            dw_len = int(request.headers.get('Content-Length', '0')) or 10000
-            progress(f'{progress_str} | {fix_val(dw_len / 1048576, 2)}MB {dir} ')
-            with open(dir, 'wb', buffering = block_size) as file:
-                for data in request.iter_content(chunk_size = block_size):
-                    file.write(data)
+            m = "(%s) %s" % (request.status_code, path)
+            err(m)
+            return
 
-def sizeof_fmt(num):
-    for x in ['bytes', 'KB', 'MB', 'GB']:
-        if num < 1024.0:
-            return "%3.1f %s" % (num, x)
-        num /= 1024.0
-    return "%3.1f %s" % (num, 'TB')
+        cl = int(request.headers.get('Content-Length', '0')) or 10000
+        dw_len = fix_val(cl / 1048576, 2)
 
-def fix_val(number, digits):
-    return f'{number:.{digits}f}'
+        m = f'{progress_str} | {dw_len}MB {path}'
+        progress(m)
 
-def str_toplus(string):
-    string = str(string)
-    return string[1:] if string[0] == '-' else string
+        now = time.time()
+        with open(path, 'wb', buffering = block_size) as file:
+            for chunk in request.iter_content(chunk_size = block_size):
+                file.write(chunk)
+                dw_total += len(chunk)
 
-def str_tominus(string):
-    string = str(string)
-    return '-' + string if string[0] != '-' else string
-
-def str_fix(string, letters = 100):
-    return str_cut(re.sub(r'[/\\?%*\-\[\]{}:|"<>]', '', string), letters)
-
-def str_cut(string, letters, postfix='...'):
-    return string[:letters] + (string[letters:] and postfix)
+                if time.time() - now > 2: 
+                    now = time.time()
+                    dw_now = fix_val(dw_total / 1048576, 2)
+                    m = f'{progress_str} | {dw_now}MB / {dw_len}MB {path}'
+                    progress(m, True)
 
 def str_esc(string, url_parse=False):
     url_regex = r"[-a-zA-Zа-яА-Я0-9@:%_\+.~#?&//=]{2,256}\.[a-zA-Zа-яА-Я0-9]{2,4}\b(\/[-a-zA-Zа-яА-Я0-9@:%_\+.~#?&//=]*)?"
-    html_escape_table = {"&": "&amp;", '"': "&quot;", "'": "&apos;", ">": "&gt;", "<": "&lt;", "\n": "<br/>\n" if url_parse else "\n"}
+    html_escape_table = {
+        "&": "&amp;", 
+        '"': "&quot;", 
+        "'": "&apos;", 
+        ">": "&gt;", 
+        "<": "&lt;", 
+        "\n": "<br/>\n" if url_parse else "\n"
+    }
 
     string = "".join(html_escape_table.get(c, c) for c in string)
     link_matches = re.finditer(url_regex, string)#, re.MULTILINE)
 
-    if url_parse:
-        replaced = []
-        for match in link_matches:
-            if match.group() not in replaced and match.group()[:+4] in ['http', 'vk.co']:
-                replaced.append(match.group())
-                string = string.replace(
-                    match.group(),
-                    f'<a href="{match.group()}" title="{match.group()}">{str_cut(match.group(), 50)}</a>'
-                )
+    if not url_parse:
+        return string
+
+    replaced = []
+    for match in link_matches:
+        mg = match.group()
+        if mg not in replaced and mg[:+4] in ['http', 'vk.co']:
+            replaced.append(mg)
+            string = string.replace(mg, f'<a href="{mg}" title="{mg}">{str_cut(mg, 50)}</a>')
 
     return string
 
-def rqst_thumb(input, th_w, th_h):
+def rqst_thumb(path, th_w, th_h):
     try:
-        image = Image.open(input).convert('RGB')
-    except Exception:
-        logger.error(f'corrupted image {input}  ')
-        return {'path': 'broken', 'height': 100, 'width': 100}
+        img = Image.open(path).convert('RGB')
+    except:
+        err('corrupted image %s' % path)
+        return {
+            'path': 'broken', 
+            'height': 100, 
+            'width': 100
+        }
 
-    src_w, src_h = image.size
+    src_w, src_h = img.size
     if src_w > th_w or src_h > th_h:
-        path = 'photos/thumbnails/th_' + os.path.basename(input)
-        image.thumbnail((th_w, th_h))
-        src_w, src_h = image.size
-        image.save(path)
+        path = 'photos/thumbnails/th_' + os.path.basename(path)
+        img.thumbnail((th_w, th_h))
+        src_w, src_h = img.size
+        img.save(path)
     else:
-        path = 'photos/' + os.path.basename(input)
+        path = 'photos/' + os.path.basename(path)
 
-    return {'path': path, 'height': src_h, 'width': src_w}
+    return {
+        'path': path, 
+        'height': src_h, 
+        'width': src_w
+    }
 
 def rqst_photo(input):
     photo = {'url': 'null', 'height': 100, 'width': 100}
@@ -164,7 +172,12 @@ def rqst_photo(input):
         elif size['type'] == 'z' and current < 5:
             current = 5
             photo = size
-    return {'url': photo['url'], 'height': photo['height'], 'width': photo['width']}
+
+    return {
+        'url': photo['url'], 
+        'height': photo['height'], 
+        'width': photo['width']
+    }
 
 def rqst_user(user_id, save=True):
     for i in range(len(users)):
@@ -187,7 +200,7 @@ def rqst_user(user_id, save=True):
         }
 
     if save:
-        rqst_file(user['photo'], f'userpics/id{user_id}.jpg')
+        rqst_file(user['photo'], 'userpics/id%s.jpg' % user_id)
         users[len(users)] = user
 
     return user
@@ -197,25 +210,34 @@ def rqst_method(method, values={}):
         try:
             r = vk_session.method(method, values)
             return r
-        except Exception as ex:
-            ex_str = str(ex)
+            
+        except Exception as e:
+            e = str(e)
 
             # invalid login/pass
-            if '[5] User authorization failed:' in ex_str:
-                logger.error('autechre error: ' + ex_str[31:])
+            if '[5] User authorization failed:' in e:
+                err('autechre error: ' + e[31:])
                 sys.exit()
 
-            # invalid id
-            if 'Invalid user id' in ex_str or 'group_ids is undefined' in ex_str:
+            # non-existing user
+            if 'Invalid user id' in e:
+                return None
+
+            # non-existing group
+            if 'group_ids is undefined' in e:
+                return None
+
+            # non-existing chat
+            if 'no access to this chat' in e:
                 return None
 
             # idk
-            if 'Internal server error' in ex_str:
-                logger.warning(f'internal catched, waiting...   ')
+            if 'Internal server error' in e:
+                warn('internal catched, waiting...   ')
                 time.sleep(100)
 
             else:
-                logger.error(f'execption in \'{method}\': {ex_str}   ')
+                err(f'execption in \'{method}\': {e}, values={values}   ')
                 time.sleep(10)
 
 def rqst_message_service(input):
@@ -223,8 +245,8 @@ def rqst_message_service(input):
     url_link = '<a href="%s" style="color: #70777b">%s</a>'
 
     from_id = rqst_user(input['from_id'])
-    from_prefix = 'https://vk.com/id' if from_id['id'] > 0 else 'https://vk.com/club'
-    
+    from_prefix = 'https://vk.com/' + ('id' if from_id['id'] > 0 else 'club')
+
     message = ''
     TYPE = input['action']['type']
 
@@ -305,7 +327,7 @@ def rqst_message_service(input):
                 )
 
         case _:
-            logger.error(f'missing_service: {input}')
+            err(f'missing_service: {input}')
 
     return f'\n<div class="message service" id="message{input["id"]}"><div class="body details">\n    {message}</div>\n</div>\n'
 
@@ -323,14 +345,20 @@ def rqst_attachments(input):
         '</a>\n'
     )
 
-    human_date = datetime.datetime.fromtimestamp(input['date']).strftime('%y-%m-%d_%H-%M-%S')
+    human_date = datetime.fromtimestamp(input['date']).strftime('%y-%m-%d_%H-%M-%S')
 
     if 'geo' in input:
         sw_joined = True
-        html_details = '%s %s' % (input["geo"]["coordinates"]["latitude"], input["geo"]["coordinates"]["longitude"] )
+        html_details = '%s %s' % (
+            input["geo"]["coordinates"]["latitude"], 
+            input["geo"]["coordinates"]["longitude"]
+        )
 
         if 'place' in input["geo"]:
-            html_details = '%s (%s)' % (input["geo"]["place"]["title"], html_details )
+            html_details = '%s (%s)' % (
+                input["geo"]["place"]["title"],
+                html_details
+            )
 
         pre_attachments = '<div class="media_wrap clearfix">\n%s</div>\n' % ( 
             data_blank % (
@@ -345,7 +373,9 @@ def rqst_attachments(input):
         TYPE = a['type']
 
         data_fragment = 'missing_attachment = %s' % a
-        json_fragment = '' if options.skip_json else f'title="{str_esc(json.dumps(a, indent=10, ensure_ascii=False, sort_keys=True))}"'
+        json_fragment = ''
+        if not options.skip_json:
+            json_fragment = f'title="{str_esc(json.dumps(a, indent=10, ensure_ascii=False, sort_keys=True))}"'
 
         match TYPE:
             case "video":
@@ -353,33 +383,33 @@ def rqst_attachments(input):
                 data_fragment = data_blank % (
                     f'<a class="media clearfix pull_left block_link media_video" {json_fragment} href="https://vk.com/video{a["video"]["owner_id"]}_{a["video"]["id"]}">',
                     f'{a["video"]["title"]}',
-                    f'{datetime.timedelta(seconds=int(a["video"]["duration"]))} | {a["video"]["owner_id"]}_{a["video"]["id"]}'
+                    f'{timedelta(seconds=int(a["video"]["duration"]))} | {a["video"]["owner_id"]}_{a["video"]["id"]}'
                 )
 
             case "audio":
-                audio_name = str_fix(str_cut(f'{a["audio"]["artist"]} - {a["audio"]["title"]} ({a["audio"]["owner_id"]}_{a["audio"]["id"]})', 80, ''))
+                audio_name = str_fix(str_cut(f'{a["audio"]["artist"]} - {a["audio"]["title"]} ({a["audio"]["owner_id"]}_{a["audio"]["id"]})', 80, '')) #TODO
                 try:
                     href = f'music/{audio_name}.mp3'
                     if options.skip_music:
-                        assert False
+                        raise Exception()
 
                     if os.path.exists(href) and not options.rewrite_files:
                         pass
                     else:
                         audio = vk_audio.get_audio_by_id(a["audio"]["owner_id"], a["audio"]["id"])
                         if 'mp3' in audio['url']:
-                            mus.rqst_mp3(audio, href)
+                            mu.rqst_mp3(audio, href)
                         elif 'm3u8' in audio['url']:
-                            mus.rqst_m3u8(audio, href)
+                            mu.rqst_m3u8(audio, href)
                         else:
-                            assert False
-                except (StopIteration, ValueError, AssertionError):
+                            raise Exception()
+                except:
                     href = f'https://m.vk.com/audio{a["audio"]["owner_id"]}_{a["audio"]["id"]}'
 
                 data_fragment = data_blank % (
                     f'<a class="media clearfix pull_left block_link media_audio_file" {json_fragment} href="{href}">',
                     audio_name,
-                    f'{datetime.timedelta(seconds=int(a["audio"]["duration"]))} | {a["audio"]["owner_id"]}_{a["audio"]["id"]} '
+                    f'{timedelta(seconds=int(a["audio"]["duration"]))} | {a["audio"]["owner_id"]}_{a["audio"]["id"]} '
                 )
 
             case "wall":
@@ -460,7 +490,7 @@ def rqst_attachments(input):
                     case "canceled_by_receiver":
                         html_details = 'Отклонён'
                     case "reached":
-                        html_details = f'Завершен ({datetime.timedelta(seconds=int(a["call"]["duration"]))})'
+                        html_details = f'Завершен ({timedelta(seconds=int(a["call"]["duration"]))})'
 
                 data_fragment = data_blank % (
                     f'<a class="media clearfix pull_left block_link media_call" {json_fragment}>',
@@ -495,7 +525,7 @@ def rqst_attachments(input):
                 data_fragment = data_blank % (
                     f'<a class="media clearfix pull_left block_link media_voice_message" {json_fragment} href="{href}">',
                     'Голосовое сообщение',
-                    datetime.timedelta(seconds=int(a["audio_message"]["duration"]))
+                    timedelta(seconds=int(a["audio_message"]["duration"]))
                 )
 
             case "sticker":
@@ -523,7 +553,7 @@ def rqst_attachments(input):
                         f'{p["height"]}x{p["width"]}'
                     )
                 else:
-                    photo_date = datetime.datetime.fromtimestamp(a['photo']['date']).strftime('%y-%m-%d_%H-%M-%S')
+                    photo_date = datetime.fromtimestamp(a['photo']['date']).strftime('%y-%m-%d_%H-%M-%S')
                     namefile = f'ph-{input["conversation_message_id"]}-{i}_{photo_date}.jpg'
                     rqst_file(p['url'], 'photos/' + namefile)
                     thumb = rqst_thumb('photos/' + namefile, 350, 280)
@@ -534,7 +564,7 @@ def rqst_attachments(input):
                     )
 
             case _:
-                logger.error(f'missing_attachment: {a}')
+                err(f'missing_attachment: {a}')
 
         if sw_joined:
             post_attachments += (
@@ -561,9 +591,9 @@ def rqst_message(input, forwarded=False):
         sender = f'<a href="https://vk.com/club{str_toplus(from_id["id"])}">{from_id["name"]}</a>'
 
     # message sending/changing time
-    date = datetime.datetime.fromtimestamp(input['date']).strftime('%d/%m/%y %H:%M:%S')
+    date = datetime.fromtimestamp(input['date']).strftime('%d/%m/%y %H:%M:%S')
     if 'update_time' in input:
-        date = f'({datetime.datetime.fromtimestamp(input["update_time"]).strftime("%H:%M:%S")}) {date}'
+        date = f'({datetime.fromtimestamp(input["update_time"]).strftime("%H:%M:%S")}) {date}'
 
     # missing id fix
     if 'conversation_message_id' not in input:
@@ -574,7 +604,7 @@ def rqst_message(input, forwarded=False):
         if 'conversation_message_id' in input['reply_message']:
             fwd_messages += rqst_message(input['reply_message'], True)
         else:
-            fwd_messages +=  f'<div title="{input["reply_message"]}" class="reply_to details">Нет id пересланного сообщения</div>\n'
+            fwd_messages += f'<div title="{input["reply_message"]}" class="reply_to details">Нет id пересланного сообщения</div>\n'
 
     # forwarded messages
     if 'fwd_messages' in input:
@@ -601,7 +631,7 @@ def rqst_message(input, forwarded=False):
         date if forwarded else sender,
         fwd_messages,
         str_esc(input["text"], True),
-        '<div class="message default"></div>\n' if input["text"] != '' and forwarded and 'fwd_messages' not in input else '' + pre_attachments,
+        '<div class="message default"></div>\n' if input["text"] and forwarded and 'fwd_messages' not in input else '' + pre_attachments,
         post_attachments
     )
 
@@ -609,7 +639,8 @@ def makehtml(filename, page, count, target, chat, const_offset_count):
     global progress_str, items_done, offset_count
     for i in range(options.page_number):
         
-        while True: #empty check
+        # empty check
+        while True: 
             chunk = rqst_method(
                 'messages.getHistory', 
                 {
@@ -619,24 +650,25 @@ def makehtml(filename, page, count, target, chat, const_offset_count):
                     'offset': offset_count * 200
                 }
             )
-            if len(chunk['items']) != 0 or offset_count < 0:
+            if chunk['items'] or offset_count < 0:
                 break
-            else:
-                offset_count -= 1
+
+            offset_count -= 1
 
         for msg in reversed(chunk['items']):
             text_append(filename, rqst_message_service(msg) if 'action' in msg else rqst_message(msg))
             items_done += 1
 
-            progress_str = f'[{str_cut(str_fix(chat["title"]), 20)}]'   
+            progress_str =  f'[{str_cut(str_fix(chat["title"]), 20)}]'   
             progress_str += f' {fix_val((items_done) / count * 100, 1)}%'
             progress_str += f' {items_done}/{count}'
-            progress_str += f' u={len(users)}'
-            progress_str += f' html={page + 1}/{count // ( 200 * options.page_number ) + 1}'
-            progress_str += f' htmlch={i + 1}/{options.page_number}'
-            progress_str += f' allch={const_offset_count - offset_count}/{const_offset_count}'
+            progress_str += f' u{len(users)}'
+            progress_str += f' pg{page + 1}/{count // ( 200 * options.page_number ) + 1}'
+            progress_str += f' pgch{i + 1}/{options.page_number}'
+            progress_str += f' allch{const_offset_count - offset_count}/{const_offset_count}'
             
             progress(progress_str)
+
 
         offset_count -= 1
 
@@ -653,6 +685,10 @@ def makedump(target):
             {'chat_id': target - int(2e9), 'fields': 'photo_200'}
         )
 
+        if r is None:
+            err('no access to %s' % target)
+            return
+
         chat = {
             'title': r['title'],
             'photo': r['photo_200'] if 'photo_200' in r else 'https://vk.com/images/deactivated_200.png'
@@ -662,7 +698,7 @@ def makedump(target):
 
         info = (
             f'Название: {chat["title"]}\n'
-            f'Сохранено в: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
+            f'Сохранено в: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
             f'Сидящий: {me["first_name"]} {me["last_name"]} ({me["id"]})\n'
             f'Админ: {admin["name"]} ({admin["id"]})\n'
             f'Юзеров: {r["members_count"]}'
@@ -675,14 +711,20 @@ def makedump(target):
             'photo': r['photo']
         }
 
+        if r is None:
+            err('no access to %s' % target)
+            return
+
         info = (
             f'Название: {chat["title"]}\n'
-            f'Сохранено в: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
+            f'Сохранено в: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
             f'Сидящий: {me["first_name"]} {me["last_name"]} ({me["id"]})'
         )
 
     # directory preparation
-    work_dir = f'{(str_cut(str_fix(chat["title"]), 40, ""))} ({target})'
+    d =  str_cut(str_fix(chat["title"]), 40, "")
+    work_dir = '%s (%s)' % (d, target)
+
     shutil.copytree('blank', work_dir, dirs_exist_ok=True)
     os.chdir(work_dir)
 
@@ -711,7 +753,7 @@ def makedump(target):
         text_append(filename, mainfile % ( str_esc(chat["title"]), info, str_esc(chat["title"]) ) )
 
         # to the previous page
-        if page != 0: 
+        if page:
             text_append(
                 filename,
                 f'\n<a class="pagination block_link" href="messages{page}.html">Предыдущая страница ( {page} / {page_count} )</a>\n'
@@ -730,8 +772,11 @@ def makedump(target):
         # eof
         text_append(filename, '\n            </div>\n        </div>\n    </div>\n</body>\n</html>')
 
+        # prettify
+        html_fmt(filename)
+
     end_time = fix_val(time.time() - start_time, 0)
-    logger.success(f'{chat["title"]} finished in {datetime.timedelta(seconds=int(end_time))}')
+    ok(f'{chat["title"]} finished in {timedelta(seconds=int(end_time))} ')
     os.chdir('..')
 
 mainfile = (
@@ -821,8 +866,8 @@ jnd_blank = (
 
 if __name__ == "__main__":
     # loguru custom preset
-    logger.remove(0)
-    logger.add(
+    log.remove(0)
+    log.add(
         sys.stderr,
         backtrace = True,
         diagnose = True,
@@ -834,8 +879,13 @@ if __name__ == "__main__":
     def rqst_dialogs():
         conversations = []
         count = rqst_method('messages.getConversations', {'count': 0})['count']
+        range_count = count // 200 + 1
 
-        for offset in range(count // 200 + 1):
+        for offset in range(range_count):
+            m = "loading dialogs %s/%s" % (offset, range_count)
+            if range_count > 1:
+                progress(m)
+
             chunk = rqst_method(
                 'messages.getConversations',
                 {
@@ -846,12 +896,12 @@ if __name__ == "__main__":
             )
 
             for item in chunk['items']:
-                id = item['conversation']['peer']['id']
+                conv_id = item['conversation']['peer']['id']
 
-                if id not in conversations:
-                    conversations.append(id)
+                if conv_id not in conversations:
+                    conversations.append(conv_id)
 
-        logger.info('loaded %s dialogs!' % len(conversations))
+        inf('loaded %s dialogs!' % len(conversations))
         return conversations
 
     if not options.login_info:
@@ -865,65 +915,38 @@ if __name__ == "__main__":
             vk_session.auth()
             vk_audio = audio.VkAudio(vk_session)
 
-        except AuthError as ex:
-            logger.error('autechre error: ' + str(ex))
-            sys.exit()
+        except AuthError as e:
+            m = 'autechre error: %s' % str(e)
+            err(m)
+            sys.exit(1)
 
     elif len(options.login_info) >= 85:
         vk_session = VkApi(token=options.login_info)
-        logger.warning('token used, music will not dumped')
+        warn('token used, music will not dumped')
         options.skip_music = True
 
     else:
-        logger.error('login info is invalid!')
-        sys.exit()
+        err('login info is invalid!')
+        sys.exit(1)
 
     me = rqst_method('users.get')[0]
     me_fl = str_fix(me["first_name"] + " " + me["last_name"])
-    logger.info(f'{me_fl} ({me["id"]})')
-    logger.add('%s.txt' % me_fl,
-        backtrace = True,
-        diagnose = True,
-        format = "{time:YYYY-MM-DD HH:mm:ss.SSS zz} | <level>{level: <8}</level> | L {line: >4} ({file}): {message}",
-        colorize = False,
-        level = 5
-    )
+    m = '%s (%s)' % (me_fl, me["id"])
+    inf(m)
+    
+    if options.verbose:
+        log.add('%s.txt' % m,
+            backtrace = True,
+            diagnose = True,
+            format = "{time:YYYY-MM-DD HH:mm:ss.SSS zz} | <level>{level: <8}</level> | L {line: >4} ({file}): {message}",
+            colorize = False,
+            level = 5
+        )
 
     conversations = rqst_dialogs()
 
-    if len(arguments):
-        for i in arguments:
-            users = {}
-            prev_id = 0
-            prev_date = 0
-            progress_str = ''
-
-            if i == 'self':
-                makedump(rqst_method('users.get')[0]['id'])
-
-            elif i[:+1] == '@':
-                makedump(2000000000 + int(i[1:]))
-
-            else:
-                work = None
-
-                if isinstance(work, int):
-                    work = abs(work)
-
-                check_group = rqst_method('groups.getById', {'group_ids': i})
-                check_user = rqst_method('users.get', {'user_ids': i})
-
-                # сhecking for id in dialogs (can be disabled)
-                if check_group != None and -check_group[0]['id'] in conversations:
-                    work = str_tominus(check_group[0]['id'])
-                if check_user != None and check_user[0]['id'] in conversations:
-                    work = str_toplus(check_user[0]['id'])
-
-                if work == None:
-                    logger.error(f'{i} is invalid')
-                else:
-                    makedump(int(work))
-    else: # no args = dump all
+    if not arguments:
+        # no args = dump all       
         start_time = time.time()
 
         me_dir = f'Диалоги {str_fix(me["first_name"] + " " + me["last_name"])} ({me["id"]})'
@@ -939,7 +962,41 @@ if __name__ == "__main__":
             makedump(conversations[i])
 
         end_time = fix_val(time.time() - start_time, 0)
-        logger.success(f'all saved in: {datetime.timedelta(seconds=int(end_time))}')
+        end_time = timedelta(seconds=int(end_time))
+
+        inf('all saved in: %s' % end_time)
 
         shutil.rmtree('blank')
         sys.exit()
+
+    for i in arguments:
+        users = {}
+        prev_id = 0
+        prev_date = 0
+        progress_str = ''
+
+        if i == 'me':
+            makedump(rqst_method('users.get')[0]['id'])
+
+        elif i.startswith('@'):
+            makedump(2000000000 + int(i[1:]))
+
+        else:
+            work = None
+
+            if isinstance(work, int):
+                work = abs(work)
+
+            check_group = rqst_method('groups.getById', {'group_ids': i})
+            check_user = rqst_method('users.get', {'user_ids': i})
+
+            # сhecking for id in dialogs (can be disabled)
+            if check_group is not None and -check_group[0]['id'] in conversations:
+                work = str_tominus(check_group[0]['id'])
+            if check_user is not None and check_user[0]['id'] in conversations:
+                work = str_toplus(check_user[0]['id'])
+
+            if work is None:
+                err(f'{i} is invalid')
+            else:
+                makedump(int(work))

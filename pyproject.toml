@@ -13,5 +13,8 @@ dependencies = [
     "loguru>=0.7.3",
     "pillow>=11.1.0",
     "requests>=2.32.3",
-    "vk-api>=11.9.9",
+    "vk-api",
 ]
+
+[tool.uv.sources]
+vk-api = { git = "https://github.com/python273/vk_api", rev = "495ecb73b2e3308cc6e128e376753d5451f95b47" }

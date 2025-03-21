@@ -323,13 +323,9 @@ wheels = [
 [[package]]
 name = "vk-api"
 version = "11.9.9"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/python273/vk_api?rev=495ecb73b2e3308cc6e128e376753d5451f95b47#495ecb73b2e3308cc6e128e376753d5451f95b47" }
 dependencies = [
     { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/fc/6c/b696dcc8f10136f0c1afc98e37a267e46b63301e7f48ab5fc13065f0755f/vk_api-11.9.9.tar.gz", hash = "sha256:c7741e40bc05980c91ed94c84542e1e7e7370e101b5eaa74222958d4130fe3c2", size = 40570 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/55/ff/2298f424d7a7ef994e295a31911d47f23a6afdb9e880f10b2dc7a9998a8a/vk_api-11.9.9-py3-none-any.whl", hash = "sha256:c71021506449afe5b9bbb1c4acb0d86b35a007ddc21678478e46fbbeabd1f3ef", size = 48591 },
 ]
 
 [[package]]
@@ -354,7 +350,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "pillow", specifier = ">=11.1.0" },
     { name = "requests", specifier = ">=2.32.3" },
-    { name = "vk-api", specifier = ">=11.9.9" },
+    { name = "vk-api", git = "https://github.com/python273/vk_api?rev=495ecb73b2e3308cc6e128e376753d5451f95b47" },
 ]
 
 [[package]]

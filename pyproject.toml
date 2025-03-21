@@ -1,21 +1,17 @@
-[tool.poetry]
+[project]
 name = "vktools"
 version = "1.0.0"
 description = "dump things"
 authors = ["nt"]
 readme = "README.md"
 
-[tool.poetry.dependencies]
-python = "^3.11"
-ffmpeg-python = "^0.2.0"
-requests = "^2.30.0"
-vk-api = "^11.9.9"
-bs4 = "^0.0.1"
-pillow = "^9.5.0"
-cryptography = "^40.0.2"
-loguru = "^0.7.0"
-
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires-python = ">=3.11"
+dependencies = [
+    "bs4>=0.0.2",
+    "cryptography>=44.0.2",
+    "ffmpeg-python>=0.2.0",
+    "loguru>=0.7.3",
+    "pillow>=11.1.0",
+    "requests>=2.32.3",
+    "vk-api>=11.9.9",
+]

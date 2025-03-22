@@ -79,37 +79,37 @@ def rqst_str(url):
             return request.content
         warn(f'{url} ({request.status_code})')
 
-# https://github.com/Zerogoki00/vk-audio-downloader
-def m3u8_block(block, key_url):
-    def rqst_decryptor(u):
-        k = rqst_str(u)
-        c = Cipher(
-            algorithms.AES(k), 
-            modes.CBC(b'\x00' * 16), 
-            backend=default_backend()
-        )
-
-        return c.decryptor()
-
-    segments = []
-    segment_urls = re.findall(r'#EXTINF:\d+\.\d{3},\s(\S*)', block)
-
-    for s_url in segment_urls:
-        segments.append(rqst_str(track['url'][:track['url'].rfind("/")] + "/" + s_url)) # base_url
-
-    if "METHOD=AES-128" in block:
-        segment_key_url = re.findall(r':METHOD=AES-128,URI="(\S*)"', block)[0]
-
-        decryptor = rqst_decryptor(key_url)
-        if segment_key_url != key_url:
-            decryptor = rqst_decryptor(segment_key_url)
-
-        for j, seg in enumerate(segments):
-            segments[j] = decryptor.update(seg)
-
-    return b''.join(segments) # finished block
-
 def rqst_multiple(track, final_name=''):
+    # https://github.com/Zerogoki00/vk-audio-downloader
+    def m3u8_block(block, key_url):
+        def rqst_decryptor(u):
+            k = rqst_str(u)
+            c = Cipher(
+                algorithms.AES(k), 
+                modes.CBC(b'\x00' * 16), 
+                backend=default_backend()
+            )
+
+            return c.decryptor()
+
+        segments = []
+        segment_urls = re.findall(r'#EXTINF:\d+\.\d{3},\s(\S*)', block)
+
+        for s_url in segment_urls:
+            segments.append(rqst_str(track['url'][:track['url'].rfind("/")] + "/" + s_url)) # base_url
+
+        if "METHOD=AES-128" in block:
+            segment_key_url = re.findall(r':METHOD=AES-128,URI="(\S*)"', block)[0]
+
+            decryptor = rqst_decryptor(key_url)
+            if segment_key_url != key_url:
+                decryptor = rqst_decryptor(segment_key_url)
+
+            for j, seg in enumerate(segments):
+                segments[j] = decryptor.update(seg)
+
+        return b''.join(segments) # finished block
+
     block_size = 1024 # 1 Kibibyte
 
     id_tmp = '%s.tmp' % track["id"]

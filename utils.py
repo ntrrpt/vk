@@ -11,11 +11,11 @@ def sizeof_fmt(num):
     return "%3.1f %s" % (num, 'TB')
 
 def html_fmt(path):
-    html = open(path).read()
+    html = open(path, encoding='utf-8').read()
     soup = BeautifulSoup(html, "html.parser")
     fmt_html = soup.prettify()
 
-    with open(path, "w") as f:
+    with open(path, "w", encoding='utf-8') as f:
         f.write(fmt_html)
 
 def fix_val(number, digits):

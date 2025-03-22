@@ -11,14 +11,17 @@ import pathlib
 import shutil
 import requests
 
-from utils import sizeof_fmt
-from utils import html_fmt
-from utils import fix_val
-from utils import str_toplus
-from utils import str_tominus
-from utils import str_fix
-from utils import str_cut
-from utils import text_append
+from utils import (
+    sizeof_fmt,
+    html_fmt,
+    fix_val,
+    str_toplus,
+    str_tominus,
+    str_fix,
+    str_cut,
+    text_append,
+    delete_file
+)
 
 import mu
 from PIL import Image
@@ -110,12 +113,12 @@ def str_esc(string, url_parse=False):
     }
 
     string = "".join(html_escape_table.get(c, c) for c in string)
-    link_matches = re.finditer(url_regex, string)#, re.MULTILINE)
-
+    
     if not url_parse:
         return string
 
     replaced = []
+    link_matches = re.finditer(url_regex, string)#, re.MULTILINE)
     for match in link_matches:
         mg = match.group()
         if mg not in replaced and mg[:+4] in ['http', 'vk.co']:
@@ -387,7 +390,12 @@ def rqst_attachments(input):
                 )
 
             case "audio":
-                audio_name = str_fix(str_cut(f'{a["audio"]["artist"]} - {a["audio"]["title"]} ({a["audio"]["owner_id"]}_{a["audio"]["id"]})', 80, '')) #TODO
+                artist = str_cut(a["audio"]["artist"], 100, '')
+                title = str_cut(a["audio"]["title"], 100, '')
+                audio_name = "%s - %s" % (artist, title)
+                audio_name = "%s (%s_%s)" % (audio_name, a["audio"]["owner_id"], a["audio"]["id"])
+                audio_name = str_fix(audio_name, 0) # ntfs escaping
+
                 try:
                     href = f'music/{audio_name}.mp3'
                     if options.skip_music:
@@ -395,14 +403,11 @@ def rqst_attachments(input):
 
                     if os.path.exists(href) and not options.rewrite_files:
                         pass
+
                     else:
                         audio = vk_audio.get_audio_by_id(a["audio"]["owner_id"], a["audio"]["id"])
-                        if 'mp3' in audio['url']:
-                            mu.rqst_mp3(audio, href)
-                        elif 'm3u8' in audio['url']:
-                            mu.rqst_m3u8(audio, href)
-                        else:
-                            raise Exception()
+                        mu.rqst_multiple(audio, href)
+                            
                 except:
                     href = f'https://m.vk.com/audio{a["audio"]["owner_id"]}_{a["audio"]["id"]}'
 

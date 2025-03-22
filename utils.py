@@ -1,4 +1,6 @@
 from bs4 import BeautifulSoup
+from vk_api import VkApi
+import pathlib
 import re
 
 def sizeof_fmt(num):
@@ -33,9 +35,15 @@ def str_cut(string, letters, postfix='...'):
     return string[:letters] + (string[letters:] and postfix)
 
 def str_fix(string, letters = 100):
-    sub = re.sub(r'[/\\?%*\-\[\]{}:|"<>]', '', string)
-    return str_cut(sub, letters)
+    r = re.sub(r'[/\\?%*:{}【】|"<>]', '', string) # [/\\?%*:{}【】|"<>]
+    if letters:
+        r = str_cut(r, letters)
+    return r
 
 def text_append(path, data):
     with open(path, 'a', encoding='utf-8') as f:
         f.write(data + '\n')
+
+def delete_file(filename):
+    rem_file = pathlib.Path(filename)
+    rem_file.unlink(missing_ok=True)

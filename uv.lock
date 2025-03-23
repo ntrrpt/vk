@@ -340,6 +340,7 @@ dependencies = [
     { name = "pillow" },
     { name = "requests" },
     { name = "vk-api" },
+    { name = "yt-dlp" },
 ]
 
 [package.metadata]
@@ -351,6 +352,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=11.1.0" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "vk-api", git = "https://github.com/python273/vk_api?rev=495ecb73b2e3308cc6e128e376753d5451f95b47" },
+    { name = "yt-dlp", specifier = ">=2025.3.21" },
 ]
 
 [[package]]
@@ -360,4 +362,13 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/b3/8f/705086c9d734d3b663af0e9bb3d4de6578d08f46b1b101c2442fd9aecaa2/win32_setctime-1.2.0.tar.gz", hash = "sha256:ae1fdf948f5640aae05c511ade119313fb6a30d7eabe25fef9764dca5873c4c0", size = 4867 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e1/07/c6fe3ad3e685340704d314d765b7912993bcb8dc198f0e7a89382d37974b/win32_setctime-1.2.0-py3-none-any.whl", hash = "sha256:95d644c4e708aba81dc3704a116d8cbc974d70b3bdb8be1d150e36be6e9d1390", size = 4083 },
+]
+
+[[package]]
+name = "yt-dlp"
+version = "2025.3.21"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fb/ab/8c8635d642397d2ba6e9558edbbd54b1559616dc631d0183b6aa08ed7917/yt_dlp-2025.3.21.tar.gz", hash = "sha256:5bcf47b2897254ea3816935a8dde47d243bff556782cced6b16a2b85e6b682ba", size = 2957985 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/94/ea/d610d546864949ee38077fd6cb785eb9907d857b1e9d5bf57d460f1df33d/yt_dlp-2025.3.21-py3-none-any.whl", hash = "sha256:80d5ce15f9223e0c27020b861a4c5b72c6ba5d6c957c1b8fd2a022a69783f482", size = 3218567 },
 ]

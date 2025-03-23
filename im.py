@@ -6,6 +6,7 @@ import time
 import random
 import optparse
 import os
+import io
 import re
 import pathlib
 import shutil
@@ -24,6 +25,7 @@ from utils import (
 )
 
 import mu
+import yt_dlp
 from PIL import Image
 from loguru import logger as log
 from vk_api import VkApi, audio
@@ -31,11 +33,13 @@ from vk_api.exceptions import AuthError
 tr, warn, inf, err, ok = (log.trace, log.warning, log.info, log.error, log.success)
 
 prev_id = prev_date = offset_count = items_done = 0
+vk_cookies = '# Netscape HTTP Cookie File\n'
 progress_str = ''
 
 parser = optparse.OptionParser()
 parser.add_option('--novoice',      dest='skip_voices',     action='store_true', help='don\'t save voice messages')
 parser.add_option('--nomusic',      dest='skip_music',      action='store_true', help='don\'t save music files')
+parser.add_option('--novideo',      dest='skip_video',      action='store_true', help='don\'t save video files')
 parser.add_option('--nophoto',      dest='skip_photos',     action='store_true', help='don\'t save pictures')
 parser.add_option('--nograffiti',   dest='skip_graffiti',   action='store_true', help='don\'t save graffiti')
 parser.add_option('--nostickers',   dest='skip_stickers',   action='store_true', help='don\'t save stickers')
@@ -76,30 +80,39 @@ def rqst_file(url, path):
         return
 
     block_size = 1024
+    max_tries = 5
     dw_total = 0
-    with requests.get(url, stream=True, timeout=10) as request:
-        if not request:
-            m = "(%s) %s" % (request.status_code, path)
-            err(m)
+
+    while max_tries:
+        try:
+            with requests.get(url, stream=True, timeout=10) as request:
+                if not request:
+                    err(f"({request.status_code}) {path}")
+                    return
+
+                cl = int(request.headers.get('Content-Length', '0')) or 10000
+                dw_len = fix_val(cl / 1048576, 2)
+
+                progress(f'{progress_str} | {dw_len}MB {path}')
+
+                now = time.time()
+                with open(path, 'wb', buffering = block_size) as file:
+                    for chunk in request.iter_content(chunk_size = block_size):
+                        file.write(chunk)
+                        dw_total += len(chunk)
+
+                        if time.time() - now > 2: 
+                            now = time.time()
+                            dw_now = fix_val(dw_total / 1048576, 2)
+                            m = f'{progress_str} | {dw_now}MB / {dw_len}MB {path}'
+                            progress(m, True)
             return
+        except:
+            warn(f'{progress_str} | retry {path}')
+            max_tries -= 1
 
-        cl = int(request.headers.get('Content-Length', '0')) or 10000
-        dw_len = fix_val(cl / 1048576, 2)
+    err(f'{progress_str} | timeout {path}')
 
-        m = f'{progress_str} | {dw_len}MB {path}'
-        progress(m)
-
-        now = time.time()
-        with open(path, 'wb', buffering = block_size) as file:
-            for chunk in request.iter_content(chunk_size = block_size):
-                file.write(chunk)
-                dw_total += len(chunk)
-
-                if time.time() - now > 2: 
-                    now = time.time()
-                    dw_now = fix_val(dw_total / 1048576, 2)
-                    m = f'{progress_str} | {dw_now}MB / {dw_len}MB {path}'
-                    progress(m, True)
 
 def str_esc(string, url_parse=False):
     url_regex = r"[-a-zA-Zа-яА-Я0-9@:%_\+.~#?&//=]{2,256}\.[a-zA-Zа-яА-Я0-9]{2,4}\b(\/[-a-zA-Zа-яА-Я0-9@:%_\+.~#?&//=]*)?"
@@ -382,9 +395,49 @@ def rqst_attachments(input):
 
         match TYPE:
             case "video":
-                # todo: yt-dlp?
+                # TODO: need 'remixnsid' cookie for private videos
+                v_id = "%s_%s" % (a["video"]["owner_id"], a["video"]["id"])
+                link = "https://vk.com/video" + v_id
+                href = "videos/%s (%s).mp4" % (str_fix(a["video"]["title"], 200), v_id)
+                
+                try:
+                    if options.skip_video:
+                        raise StopIteration
+
+                    if os.path.exists(href):
+                        if not options.rewrite_files:
+                            raise StopIteration
+                        else:
+                            delete_file(href)
+
+                    dbg = False
+                    yt = False # TODO: filter non-vk sites
+                    opts = {
+                        'quiet': not dbg,
+                        'verbose': dbg,
+                        'outtmpl': href, 
+                        'format': 'best',
+                        'extractor_retries': 5 if yt else 1,
+                        'fragment_retries': 5 if yt else 1,
+                        'socket_timeout': 30 if yt else 10,
+                        'retries': 5 if yt else 1,
+                        'cookiefile': io.StringIO(vk_cookies)
+                    }
+
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        ydl.download([link])
+
+                    tr(f'{progress_str} | {href}')
+
+                except StopIteration:
+                    inf(f'{progress_str} | {href}')
+                    pass
+                except:
+                    warn(f'{progress_str} | {href}')
+                    href = link
+
                 data_fragment = data_blank % (
-                    f'<a class="media clearfix pull_left block_link media_video" {json_fragment} href="https://vk.com/video{a["video"]["owner_id"]}_{a["video"]["id"]}">',
+                    f'<a class="media clearfix pull_left block_link media_video" {json_fragment} href="{href}">',
                     f'{a["video"]["title"]}',
                     f'{timedelta(seconds=int(a["video"]["duration"]))} | {a["video"]["owner_id"]}_{a["video"]["id"]}'
                 )
@@ -401,13 +454,18 @@ def rqst_attachments(input):
                     if options.skip_music:
                         raise Exception()
 
-                    if os.path.exists(href) and not options.rewrite_files:
-                        pass
+                    if os.path.exists(href):
+                        if not options.rewrite_files:
+                            raise StopIteration
+                        else:
+                            delete_file(href)
 
-                    else:
-                        audio = vk_audio.get_audio_by_id(a["audio"]["owner_id"], a["audio"]["id"])
-                        mu.rqst_multiple(audio, href)
-                            
+                    audio = vk_audio.get_audio_by_id(a["audio"]["owner_id"], a["audio"]["id"])
+                    mu.rqst_multiple(audio, href)
+
+                except StopIteration:
+                    inf(f'{progress_str} | {href}')
+                    pass
                 except:
                     href = f'https://m.vk.com/audio{a["audio"]["owner_id"]}_{a["audio"]["id"]}'
 
@@ -733,7 +791,7 @@ def makedump(target):
     shutil.copytree('blank', work_dir, dirs_exist_ok=True)
     os.chdir(work_dir)
 
-    for DIR in ['voice_messages', 'music', 'photos/thumbnails', 'docs', 'userpics']:
+    for DIR in ['voice_messages', 'music', 'videos', 'photos/thumbnails', 'docs', 'userpics']:
         os.makedirs(DIR, exist_ok=True)
 
     rqst_file(chat['photo'], 'userpics/main.jpg')
@@ -881,15 +939,30 @@ if __name__ == "__main__":
         level = 5
     )
 
+    # not very helpful tbh
+    def rqst_cookies(login):
+        ret = '# Netscape HTTP Cookie File\n'
+        try:
+            with open("vk_config.v2.json", "r", encoding='utf-8') as f:
+                data = json.load(f)
+        except:
+            return ret
+
+        if login in data:
+            for cookie in data[login]['cookies']:
+                s = "%s\tTRUE\t/\tTRUE\t0\t%s\t%s\n" % (cookie['domain'], cookie['name'], cookie['value'])
+                ret += s
+
+        return ret
+
     def rqst_dialogs():
         conversations = []
         count = rqst_method('messages.getConversations', {'count': 0})['count']
         range_count = count // 200 + 1
 
         for offset in range(range_count):
-            m = "loading dialogs %s/%s" % (offset, range_count)
             if range_count > 1:
-                progress(m)
+                progress("loading dialogs %s/%s" % (offset, range_count))
 
             chunk = rqst_method(
                 'messages.getConversations',
@@ -919,10 +992,10 @@ if __name__ == "__main__":
         try:
             vk_session.auth()
             vk_audio = audio.VkAudio(vk_session)
+            vk_cookies = rqst_cookies(lp[0])
 
         except AuthError as e:
-            m = 'autechre error: %s' % str(e)
-            err(m)
+            err('autechre error: %s' % str(e))
             sys.exit(1)
 
     elif len(options.login_info) >= 85:

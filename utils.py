@@ -27,7 +27,7 @@ def str_toplus(string):
     return r
 
 def str_tominus(string):
-    s = str(s)
+    s = str(string)
     r = '-' + s if not s.startswith('-') else s
     return r
 

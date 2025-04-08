@@ -197,15 +197,14 @@ def rqst_multiple(track, final_name=''):
     else:
         err("nani | %s" % track)
 
-    p = (
-        ffmpeg
-        .input("mu.ts")
-        .output("mu.mp3", acodec='copy', **{ 
-            'metadata': 'title=%s' % track["title"],
-            'metadata': 'artist=%s' % track["artist"],
-            'metadata': 'comment=%s_%s' % (track["owner_id"], track["id"])
-        })
-    )
+    metadata = { 
+        'metadata:g:1:':f'TPE1={track["artist"]}',
+        'metadata:g:2':f'TIT2={track["title"]}', 
+        'metadata:g:3':f'COMM={track["owner_id"]}_{track["id"]}'
+    }
+
+    p = ffmpeg.input("mu.ts").output("mu.mp3", acodec='copy', **metadata)
+    #print(ffmpeg.get_args(p))
     
     print(f'{desc}: merging...          ', end='\r')
     p.run(quiet=True)

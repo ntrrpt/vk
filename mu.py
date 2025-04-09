@@ -15,7 +15,7 @@ tr, warn, inf, err, ok = (log.trace, log.warning, log.info, log.error, log.succe
 
 from vk_api import VkApi
 from vk_api import audio
-from vk_api.exceptions import AuthError
+from vk_api.exceptions import AuthError, AccessDenied
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
@@ -33,6 +33,7 @@ from utils import (
 )
 
 m3u8_threads = 3
+skip_existing = True
 
 def progress(string):
     print(" " * os.get_terminal_size().columns, end = '\r')
@@ -120,11 +121,12 @@ def rqst_multiple(track, final_name=''):
         final_name = "%s (%s).mp3" % (name, track['id'])
         final_name = str_fix(final_name, 0) # ntfs escaping
 
-    glob_esc = {"[": "[[]", ']': "[]]"}
-    glob_fn = "".join(glob_esc.get(c, c) for c in final_name)
-    if glob('**/%s' % glob_fn, recursive=True):
-        warn("exists | %s " % desc)
-        return
+    if skip_existing:
+        glob_esc = {"[": "[[]", ']': "[]]"}
+        glob_fn = "".join(glob_esc.get(c, c) for c in final_name)
+        if glob('**/%s' % glob_fn, recursive=True):
+            warn("exists | %s " % desc)
+            return
 
     if '.mp3' in track["url"]:
         with requests.get(track["url"], stream=True, timeout=10) as r:
@@ -197,20 +199,37 @@ def rqst_multiple(track, final_name=''):
     else:
         err("nani | %s" % track)
 
-    metadata = { 
-        'metadata:g:1:':f'TPE1={track["artist"]}',
-        'metadata:g:2':f'TIT2={track["title"]}', 
-        'metadata:g:3':f'COMM={track["owner_id"]}_{track["id"]}'
-    }
+    md = [
+        f'TPE1={track["artist"]}',
+        f'TIT2={track["title"]}', 
+        f'COMM={track["owner_id"]}_{track["id"]}'
+    ]
+    md = {f"metadata:g:{i}": e for i, e in enumerate(md)}
 
-    p = ffmpeg.input("mu.ts").output("mu.mp3", acodec='copy', **metadata)
-    #print(ffmpeg.get_args(p))
+    inputs = [ffmpeg.input("mu.ts")]
+
+    # add cover art
+    if track["track_covers"]:
+        with requests.get(track["track_covers"][0], stream=True) as request:
+            if request:
+                with open("cover.jpg", 'wb') as file:
+                    file.write(request.content)
+
+                md['disposition:v'] = 'attached_pic'
+                md['id3v2_version'] = 3
+
+                inputs.append(ffmpeg.input("cover.jpg"))
+
+    p = ffmpeg.output(*inputs, "mu.mp3", acodec='copy', **md).overwrite_output()
+    #print(*ffmpeg.get_args(p))
     
     print(f'{desc}: merging...          ', end='\r')
     p.run(quiet=True)
     
+    delete_file(final_name)
     os.rename("mu.mp3", final_name)
     delete_file("mu.ts")
+    delete_file("cover.jpg")
 
     size = sizeof_fmt(os.path.getsize(final_name))
     ok("%s (%s)" % (desc, size))
@@ -241,12 +260,14 @@ if __name__ == '__main__':
         os.makedirs(path, exist_ok=True)
         os.chdir(path)
         
-        for track in vk_audio.get_iter(
-                owner_id = album['owner_id'], 
-                album_id = album['id'], 
-                access_hash = album['access_hash']
-            ):
-            rqst_multiple(track)
+        try:
+            for track in vk_audio.get_iter(
+                    owner_id = album['owner_id'], album_id = album['id'], 
+                    access_hash = album['access_hash']
+                ):
+                rqst_multiple(track)
+        except AccessDenied:
+            err(f"no access | {path}")
 
         os.chdir('..')
 
@@ -267,9 +288,11 @@ if __name__ == '__main__':
     parser.add_option('-t', '--threads', dest='m3u8_threads', type=int, default='3', help='m3u8 threads')
     parser.add_option('-m', '--skip-music', dest='skip_music', action='store_true', help='Skip music')
     parser.add_option('-a', '--skip-albums', dest='skip_albums', action='store_true', help='Skip albums/playlists')
+    parser.add_option('-e', '--exists', dest='skip_existing', action='store_true', default=False, help='Skip existing files')
     options, arguments = parser.parse_args()
 
     m3u8_threads = options.m3u8_threads
+    skip_existing = options.skip_existing
 
     if ":" not in options.login_info:
         options.login_info = f'{input("Login: ")}:{input("Pass: ")}'
@@ -336,7 +359,7 @@ if __name__ == '__main__':
             err('targets: %s invalid.' % arg)
             continue
 
-        inf(f'targets: [{i}/{len(arguments)}] {target["name"]} is downloading. ')
+        inf(f'{i} / {len(arguments)} | {target["name"]} is downloading. ')
 
         path = '%s (%s)' % (target["name"], target["id"])
         path = str_fix(path)
@@ -349,7 +372,7 @@ if __name__ == '__main__':
             albums_list = vk_audio.get_albums(owner_id = target['id'])
 
             for i, album in enumerate(albums_list, start=1):
-                inf(f'albums: [{i}/{len(albums_list)}] {album["title"]} is downloading. ')
+                inf(f'{i} / {len(albums_list)} | {album["title"]} is downloading. ')
                 rqst_album(album)
                 print('')
 

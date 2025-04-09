@@ -198,6 +198,7 @@ def rqst_multiple(track, final_name=''):
                 print(f'{desc}: dd {i} / {len(blocks)}          ', end='\r')
     else:
         err("nani | %s" % track)
+        return
 
     md = [
         f'TPE1={track["artist"]}',

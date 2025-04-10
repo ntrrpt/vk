@@ -1,6 +1,9 @@
 from bs4 import BeautifulSoup
 from vk_api import VkApi
+
+from time import sleep
 import pathlib
+import requests
 import re
 
 def sizeof_fmt(num):
@@ -47,3 +50,23 @@ def text_append(path, data):
 def delete_file(filename):
     rem_file = pathlib.Path(filename)
     rem_file.unlink(missing_ok=True)
+
+def expand_ranges(s):
+    # "1-5,8,10-12" => 1,2,3,4,5,8,10,11,12
+    def replace_range(match):
+        start, end = map(int, match.group().split('-'))
+        return ','.join(map(str, range(start, end + 1)))
+
+    return re.sub(r'\d+-\d+', replace_range, s)
+
+def rqst_str(url, retries = 5, headers={"Accept-Encoding": "identity"}):
+    while retries:
+        try: 
+            with requests.get(url, headers) as request:
+                if request:
+                    return request.content
+                return False
+        except:
+            sleep(5)
+            retries -= 1
+        

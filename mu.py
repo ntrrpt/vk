@@ -29,7 +29,9 @@ from utils import (
     str_fix,
     str_cut,
     text_append,
-    delete_file
+    delete_file,
+    expand_ranges,
+    rqst_str
 )
 
 m3u8_threads = 3
@@ -74,11 +76,7 @@ def rqst_method(method, values={}):
                 err(f'execption in \'{method}\': {e}, values={values}   ')
                 time.sleep(10)
 
-def rqst_str(url):
-    with requests.get(url, headers={"Accept-Encoding": "identity"}) as request:
-        if request:
-            return request.content
-        warn(f'{url} ({request.status_code})')
+
 
 def rqst_multiple(track, final_name=''):
     # https://github.com/Zerogoki00/vk-audio-downloader
@@ -154,8 +152,18 @@ def rqst_multiple(track, final_name=''):
                         time.sleep(5)
 
     elif '.m3u8' in track["url"]:
-        # playlist
-        blocks = [b for b in rqst_str(track['url']).decode("utf-8").split("#EXT-X-KEY") if "#EXTINF" in b] 
+        response = rqst_str(track['url'])
+        if not response:
+            err('rip response | %s' % track)
+            return
+
+        parts = response.decode("utf-8").split("#EXT-X-KEY")
+
+        blocks = []
+        for b in parts:
+            if "#EXTINF" in b:
+                blocks.append(b)
+
         if not blocks:
             err('internal | %s' % desc)
             return
@@ -304,7 +312,6 @@ if __name__ == '__main__':
     try:
         vk_session.auth()
         vk_audio = audio.VkAudio(vk_session)
-
     except AuthError as e:
         err('autechre error: %s' % str(e))
         sys.exit(1)
@@ -352,7 +359,7 @@ if __name__ == '__main__':
             track = vk_audio.get_audio_by_id(owner_id, album_id)
 
             rqst_multiple(track)
-                
+
             continue
 
         target = rqst_id(arg)

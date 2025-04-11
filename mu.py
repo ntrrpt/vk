@@ -22,13 +22,11 @@ from cryptography.hazmat.backends import default_backend
 
 from utils import (
     sizeof_fmt,
-    html_fmt,
-    fix_val,
     str_toplus,
     str_tominus,
     str_fix,
     str_cut,
-    text_append,
+    check_ffmpeg,
     delete_file,
     expand_ranges,
     rqst_str
@@ -36,6 +34,7 @@ from utils import (
 
 m3u8_threads = 3
 skip_existing = True
+ranges = []
 
 def progress(string):
     print(" " * os.get_terminal_size().columns, end = '\r')
@@ -111,9 +110,15 @@ def rqst_multiple(track, final_name=''):
 
     block_size = 1024 # 1 Kibibyte
 
-    id_tmp = '%s.tmp' % track["id"]
-    name = "%s - %s" % (str_cut(track["artist"], 100, ''), str_cut(track["title"], 100, ''))
-    desc = "%s - %s" % (str_cut(track["artist"], 50, ''), str_cut(track["title"], 50, ''))
+    name = "%s - %s" % (
+        str_cut(track["artist"], 100, ''), 
+        str_cut(track["title"], 100, '')
+    )
+
+    desc = "%s - %s" % (
+        str_cut(track["artist"], 50, ''), 
+        str_cut(track["title"], 50, '')
+    )
 
     if not final_name:
         final_name = "%s (%s).mp3" % (name, track['id'])
@@ -129,8 +134,7 @@ def rqst_multiple(track, final_name=''):
     if '.mp3' in track["url"]:
         with requests.get(track["url"], stream=True, timeout=10) as r:
             if not r:
-                m = '%s: bad r (%s)' % (desc, r.status_code)
-                err(m)
+                err('%s: bad r (%s)' % (desc, r.status_code))
                 return 
 
             cl = int(r.headers.get('Content-Length', '0')) or None
@@ -141,14 +145,13 @@ def rqst_multiple(track, final_name=''):
                         file.write(data)
                         dw_total += len(data)
 
-                        percent = (math.ceil(cl / block_size) / math.ceil(dw_total / block_size)) * 100
-                        percent = fix_val(percent, 2)
+                        MC = math.ceil
+                        percent = (MC(cl / block_size) / MC(dw_total / block_size)) * 100
 
-                        progress(f'{desc}: {percent}% {sizeof_fmt(cl)} / {sizeof_fmt(dw_total)}')
+                        progress(f'{desc}: {int(percent)}% {sizeof_fmt(cl)} / {sizeof_fmt(dw_total)}')
 
                     except Exception as e:
-                        m = '%s (%s)' % (os.path.basename(dir), str(e))
-                        err(m)
+                        err('%s (%s)' % (os.path.basename(dir), str(e)))
                         time.sleep(5)
 
     elif '.m3u8' in track["url"]:
@@ -182,9 +185,8 @@ def rqst_multiple(track, final_name=''):
                 futures[i] = blk, future
 
                 percent = (len(futures) / (len(blocks))) * 100
-                percent = fix_val(percent, 2)
 
-                print(f'{desc}: {percent}% {len(blocks)} / {len(futures)}', end='\r')
+                print(f'{desc}: {int(percent)}% {len(blocks)} / {len(futures)}', end='\r')
                 
             for i, _ in enumerate(futures):
                 blk, future = futures[i]
@@ -251,29 +253,41 @@ if __name__ == '__main__':
         check_user = rqst_method('users.get', {'user_ids': id})
 
         if check_user: 
-            return {
-                'id': str_toplus(check_user[0]['id']), 
-                'name': f'{check_user[0]["first_name"]} {check_user[0]["last_name"]}'
-            }
+            i = str_toplus(check_user[0]['id'])
+            n = f'{check_user[0]["first_name"]} {check_user[0]["last_name"]}'
         elif check_group:
-            return {
-                'id': str_tominus(check_group[0]['id']), 
-                'name': check_group[0]["name"]
-            }
+            i = str_tominus(check_group[0]['id'])
+            n = check_group[0]["name"]
         else:
-            return False
+            return None
+
+        return {'id': i, 'name': n}
 
     def rqst_album(album):
-        path = '%s - (%s)' % (str_cut(album["title"], 200), album["id"]) # w/o "-" ???
+        if 'access_hash' not in album:
+            album["access_hash"] = ''
+
+        if "title" not in album:
+            inf('album w/o title, trying to guess...')
+            try:
+                for al in vk_audio.get_albums_iter(owner_id=album['owner_id']):
+                    if int(al['id']) == int(album['id']) and "title" in al:
+                        inf('found: %s' % al['title'])
+                        album["title"] = al['title']
+                        break
+
+                raise Exception
+            except:
+                warn('failed ToT')
+                album["title"] = ''
+
+        path = '%s - (%s)' % (str_cut(album["title"], 200), album["id"])
         path = str_fix(path, 0)
         os.makedirs(path, exist_ok=True)
         os.chdir(path)
         
         try:
-            for track in vk_audio.get_iter(
-                    owner_id = album['owner_id'], album_id = album['id'], 
-                    access_hash = album['access_hash']
-                ):
+            for track in vk_audio.get_iter(album['owner_id'], album['id'], album['access_hash']):
                 rqst_multiple(track)
         except AccessDenied:
             err(f"no access | {path}")
@@ -290,18 +304,26 @@ if __name__ == '__main__':
         level = 5
     )
 
+    if not check_ffmpeg():
+        err('ffmpeg not found')
+        sys.exit()
+
     #parse args
     parser = optparse.OptionParser()
     parser.add_option('-l', '--login', dest='login_info', default='', help='Login info (login:pass)')
-    parser.add_option('-r', '--rewrite', dest='rewrite_files', action='store_true', help='Force rewriting files')
     parser.add_option('-t', '--threads', dest='m3u8_threads', type=int, default='3', help='m3u8 threads')
-    parser.add_option('-m', '--skip-music', dest='skip_music', action='store_true', help='Skip music')
-    parser.add_option('-a', '--skip-albums', dest='skip_albums', action='store_true', help='Skip albums/playlists')
+    parser.add_option('-m', '--music', dest='music', action='store_true', help='dump music')
+    parser.add_option('-a', '--album', dest='album', action='store_true', help='dump albums/playlists')
     parser.add_option('-e', '--exists', dest='skip_existing', action='store_true', default=False, help='Skip existing files')
+    parser.add_option('-r', '--range', dest='range', default='', help='range to dump music (1,2,4,10-12)')
     options, arguments = parser.parse_args()
 
     m3u8_threads = options.m3u8_threads
     skip_existing = options.skip_existing
+
+    if options.range:
+        spl = expand_ranges(options.range).split(',')
+        ranges = [int(x.strip("'")) for x in spl]
 
     if ":" not in options.login_info:
         options.login_info = f'{input("Login: ")}:{input("Pass: ")}'
@@ -321,53 +343,39 @@ if __name__ == '__main__':
         arguments.append(str(me))
 
     for i, arg in enumerate(arguments, start=1):
-        if arg.startswith('https://'): 
-            arg = arg[8:]
-        if arg.startswith('vk.com/'): 
-            arg = arg[7:]
-        if arg.startswith('music/'):
-            arg = arg[6:]
+        for p in ['https://', 'vk.com/', 'music/']:
+            arg = arg.removeprefix(p)
+
         if arg.startswith('playlist/'):
-            arg = arg[9:]
+            arg = arg.removeprefix('playlist/')
 
-            if arg.count('_') > 1:
-                owner_id, album_id, access_hash = arg.split('_')
-            else:
-                owner_id, album_id = arg.split('_')
-                access_hash = ''
+            al = {}
+            try:
+                al["owner_id"], al["id"], al["access_hash"] = arg.split('_')
+            except:
+                al["owner_id"], al["id"] = arg.split('_')
                 
-            rqst_album(
-                {
-                    "id": album_id, 
-                    "owner_id": owner_id, 
-                    "access_hash": access_hash, 
-                    "title": access_hash # fixme?
-                }
-            )
-
+            rqst_album(al)
+            print('')
             continue
 
-        if arg[:+5] in ['audio', '[[aud']: # vkopt
-            if arg.startswith('[['): 
-                arg = arg[2:]
-            if arg.endswith(']]'): 
-                arg = arg[:-2]
-            if arg.startswith('audio'): 
-                arg = arg[5:]
+        if arg[:+5] in ['audio', '[[aud']: 
+            for p in ['[[', 'audios', 'audio']:
+                arg = arg.removeprefix(p)
+            arg = arg.removesuffix("]]")
 
-            owner_id, album_id = arg.split('_')
-            track = vk_audio.get_audio_by_id(owner_id, album_id)
-
+            tr(arg)
+            track = vk_audio.get_audio_by_id(arg.split('_'))
             rqst_multiple(track)
 
             continue
 
         target = rqst_id(arg)
         if not target:
-            err('targets: %s invalid.' % arg)
+            err('%s invalid.' % arg)
             continue
 
-        inf(f'{i} / {len(arguments)} | {target["name"]} is downloading. ')
+        inf(f'{i} / {len(arguments)} | {target["name"]}')
 
         path = '%s (%s)' % (target["name"], target["id"])
         path = str_fix(path)
@@ -375,18 +383,34 @@ if __name__ == '__main__':
         os.makedirs(path, exist_ok=True)
         os.chdir(path)
 
-        if not options.skip_albums:
-            inf(f'looking for albums...')
+        if not options.album and not options.music:
+            warn("no '-m' or '-a' option, dumping all")
+            options.album = options.music = True
+
+        if options.album:
+            inf('looking for albums...')
             albums_list = vk_audio.get_albums(owner_id = target['id'])
 
             for i, album in enumerate(albums_list, start=1):
-                inf(f'{i} / {len(albums_list)} | {album["title"]} is downloading. ')
+                if ranges and i not in ranges:
+                    if i > max(ranges):
+                        break
+                    continue
+
+                inf(f'{i} / {len(albums_list)} | {album["title"]}')
                 rqst_album(album)
                 print('')
 
-        if not options.skip_music:
-            inf(f'downloading tracks...')
-            for track in vk_audio.get_iter(owner_id = target['id']):
+        if options.music and not (options.album and ranges):
+            inf('downloading tracks...')
+
+            for i, track in enumerate(vk_audio.get_iter(owner_id = target['id']), start=1):
+                if ranges and i not in ranges:
+                    if i > max(ranges):
+                        break
+                    continue
+
                 rqst_multiple(track)
     
         os.chdir('..')  
+

@@ -69,4 +69,13 @@ def rqst_str(url, retries = 5, headers={"Accept-Encoding": "identity"}):
         except:
             sleep(5)
             retries -= 1
+
+def check_ffmpeg():
+    import subprocess as sp
+    try:
+        r = sp.run(['ffmpeg', '-version'], stdout=sp.PIPE, stderr=sp.PIPE)
+        return r.returncode == 0
+    except FileNotFoundError:
+        return False
+
         

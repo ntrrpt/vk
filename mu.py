@@ -106,7 +106,7 @@ def rqst_multiple(track, final_name=''):
             for j, seg in enumerate(segments):
                 segments[j] = decryptor.update(seg)
 
-        return b''.join(segments) # finished block
+        return b''.join(segments)
 
     block_size = 1024 # 1 Kibibyte
 
@@ -246,6 +246,7 @@ def rqst_multiple(track, final_name=''):
     ok("%s (%s)" % (desc, size))
 
 if __name__ == '__main__':
+
     def rqst_id(id):
         id = str_toplus(id)
 
@@ -274,9 +275,9 @@ if __name__ == '__main__':
                     if int(al['id']) == int(album['id']) and "title" in al:
                         inf('found: %s' % al['title'])
                         album["title"] = al['title']
-                        break
-
-                raise Exception
+                        
+                if "title" not in album:
+                    raise Exception
             except:
                 warn('failed ToT')
                 album["title"] = ''
@@ -316,6 +317,8 @@ if __name__ == '__main__':
     parser.add_option('-a', '--album', dest='album', action='store_true', help='dump albums/playlists')
     parser.add_option('-e', '--exists', dest='skip_existing', action='store_true', default=False, help='Skip existing files')
     parser.add_option('-r', '--range', dest='range', default='', help='range to dump music (1,2,4,10-12)')
+    parser.add_option('-q', '--query', dest='query', default='', help='query to search')
+    parser.add_option('-c', '--count', dest='count', default=20, help='items count for query')
     options, arguments = parser.parse_args()
 
     m3u8_threads = options.m3u8_threads
@@ -338,6 +341,45 @@ if __name__ == '__main__':
         err('autechre error: %s' % str(e))
         sys.exit(1)
 
+    if options.query:
+        r = ''
+        tracks = []
+        all_tracks = ['no'] #1
+
+        for i, track in enumerate(vk_audio.search_iter(options.query, offset=10 ), start=1):
+            print(f"   {i}\t| {track['artist']} - {track['title']}")
+            tracks.append(track)
+
+            if len(tracks) < int(options.count):
+                continue
+            
+            all_tracks += tracks
+            tracks = []
+            r = input('choose range (1,3,5-7) to dump, 0 to continue: ')
+
+            if r != '0':
+                break
+
+        spl = expand_ranges(r).split(',')
+        rng = [int(x.strip("'")) for x in spl]
+        
+        if not rng:
+            sys.exit()
+
+        path = str_fix(options.query)
+        os.makedirs(path, exist_ok=True)
+        os.chdir(path)
+
+        for i, track in enumerate(all_tracks, start=0):
+            if track == 'no' or i not in rng:
+                continue
+            print(track)
+            rqst_multiple(track)
+            
+        os.chdir('..')
+
+        sys.exit()
+                
     if not arguments:
         me = rqst_method('users.get')[0]['id']
         arguments.append(str(me))
@@ -364,7 +406,6 @@ if __name__ == '__main__':
                 arg = arg.removeprefix(p)
             arg = arg.removesuffix("]]")
 
-            tr(arg)
             track = vk_audio.get_audio_by_id(arg.split('_'))
             rqst_multiple(track)
 

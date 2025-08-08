@@ -43,9 +43,9 @@ def str_fix(string, letters = 100):
         r = str_cut(r, letters)
     return r
 
-def text_append(path, data):
+def text_append(path, data, end='\n'):
     with open(path, 'a', encoding='utf-8') as f:
-        f.write(data + '\n')
+        f.write(data + end)
 
 def delete_file(filename):
     rem_file = pathlib.Path(filename)

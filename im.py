@@ -27,6 +27,7 @@ from utils import (
 import mu
 import yt_dlp
 from PIL import Image
+from tabulate import tabulate
 from loguru import logger as log
 from vk_api import VkApi, audio
 from vk_api.exceptions import AuthError
@@ -407,33 +408,35 @@ def rqst_attachments(input):
                     if os.path.exists(href):
                         if not options.rewrite_files:
                             raise StopIteration
-                        else:
-                            delete_file(href)
+                        delete_file(href)
 
-                    dbg = False
-                    yt = False # TODO: filter non-vk sites
                     opts = {
-                        'quiet': not dbg,
-                        'verbose': dbg,
-                        'outtmpl': href, 
+                        'quiet': not options.verbose,
+                        'verbose': False,
+                        'outtmpl': href,
                         'format': 'best',
-                        'extractor_retries': 5 if yt else 1,
-                        'fragment_retries': 5 if yt else 1,
-                        'socket_timeout': 30 if yt else 10,
-                        'retries': 5 if yt else 1,
+                        'extractor_retries': 2,
+                        'fragment_retries': 2,
+                        'socket_timeout': 20,
+                        'retries': 2,
                         'cookiefile': io.StringIO(vk_cookies)
                     }
+
+                    # byedpi
+                    # opts['proxy']: "socks5://localhost:1080"
 
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         ydl.download([link])
 
-                    tr(f'{progress_str} | {href}')
+                    if options.verbose:
+                        tr(f'{progress_str} | {href}')
 
                 except StopIteration:
-                    inf(f'{progress_str} | {href}')
                     pass
+
                 except:
-                    warn(f'{progress_str} | {href}')
+                    if options.verbose:
+                        warn(f'{progress_str} | {href}')
                     href = link
 
                 data_fragment = data_blank % (
@@ -447,7 +450,7 @@ def rqst_attachments(input):
                 title = str_cut(a["audio"]["title"], 100, '')
                 audio_name = "%s - %s" % (artist, title)
                 audio_name = "%s (%s_%s)" % (audio_name, a["audio"]["owner_id"], a["audio"]["id"])
-                audio_name = str_fix(audio_name, 0) # ntfs escaping
+                audio_name = str_fix(audio_name, 0)
 
                 try:
                     href = f'music/{audio_name}.mp3'
@@ -457,14 +460,14 @@ def rqst_attachments(input):
                     if os.path.exists(href):
                         if not options.rewrite_files:
                             raise StopIteration
-                        else:
-                            delete_file(href)
+                        delete_file(href)
 
                     audio = vk_audio.get_audio_by_id(a["audio"]["owner_id"], a["audio"]["id"])
                     mu.rqst_multiple(audio, href)
 
                 except StopIteration:
-                    inf(f'{progress_str} | {href}')
+                    if options.verbose:
+                        inf(f'{progress_str} | {href}')
                     pass
                 except:
                     href = f'https://m.vk.com/audio{a["audio"]["owner_id"]}_{a["audio"]["id"]}'
@@ -719,9 +722,20 @@ def makehtml(filename, page, count, target, chat, const_offset_count):
             offset_count -= 1
 
         for msg in reversed(chunk['items']):
-            text_append(filename, rqst_message_service(msg) if 'action' in msg else rqst_message(msg))
             items_done += 1
 
+            # html msg
+            text_append(filename, rqst_message_service(msg) if 'action' in msg else rqst_message(msg))
+
+            # json msg
+            s = ",%s"
+            if not os.path.isfile("result.json"):
+                text_append("result.json", "[")
+                s = "%s"
+
+            text_append("result.json", s % json.dumps(msg, ensure_ascii=False))
+
+            # status stuff
             progress_str =  f'[{str_cut(str_fix(chat["title"]), 20)}]'   
             progress_str += f' {fix_val((items_done) / count * 100, 1)}%'
             progress_str += f' {items_done}/{count}'
@@ -794,6 +808,7 @@ def makedump(target):
     for DIR in ['voice_messages', 'music', 'videos', 'photos/thumbnails', 'docs', 'userpics']:
         os.makedirs(DIR, exist_ok=True)
 
+    # chat pfp
     rqst_file(chat['photo'], 'userpics/main.jpg')
 
     # html page creation
@@ -812,34 +827,53 @@ def makedump(target):
         filename = 'messages%s.html' % (page + 1)
         pathlib.Path(filename).unlink(missing_ok=True)
 
-        # header
+        # html header
         text_append(filename, mainfile % ( str_esc(chat["title"]), info, str_esc(chat["title"]) ) )
 
         # to the previous page
         if page:
-            text_append(
-                filename,
-                f'\n<a class="pagination block_link" href="messages{page}.html">Предыдущая страница ( {page} / {page_count} )</a>\n'
-            )
+            a = f'\n<a class="pagination block_link" href="messages{page}.html">Предыдущая страница ( {page} / {page_count} )</a>\n'
+            text_append(filename, a)
 
         # writing messages
         makehtml(filename, page, count, target, chat, const_offset_count)
 
         # to the next page
         if page + 1 != page_count: 
-            text_append(
-                filename,
-                f'\n<a class="pagination block_link" href="messages{page + 2}.html">Cледующая страница ( {page + 2} / {page_count} )</a>\n'
-            )
+            a = f'\n<a class="pagination block_link" href="messages{page + 2}.html">Cледующая страница ( {page + 2} / {page_count} )</a>\n'
+            text_append(filename, a)
 
-        # eof
+        # html eof
         text_append(filename, '\n            </div>\n        </div>\n    </div>\n</body>\n</html>')
 
         # prettify
         html_fmt(filename)
 
+    # json eof
+    text_append("result.json", "]")
+ 
+    # beatify json + irc.txt generation
+    with open("result.json", "r", encoding="utf-8") as f:
+        d = json.load(f)
+        
+    table = []
+
+    for msg in d:
+        if any(("text" not in msg, not msg["text"])):
+            continue
+
+        u = rqst_user(msg['from_id'])
+        table.append([u["name"], msg["text"]])
+
+    text_append("irc.txt", tabulate(table, tablefmt="plain"))
+
+    with open("result.json", "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=4, ensure_ascii=False)
+
     end_time = fix_val(time.time() - start_time, 0)
-    ok(f'{chat["title"]} finished in {timedelta(seconds=int(end_time))} ')
+    end_time = timedelta(seconds=int(end_time))
+
+    ok(f'{chat["title"]} finished in {end_time} ')
     os.chdir('..')
 
 mainfile = (
@@ -992,7 +1026,12 @@ if __name__ == "__main__":
         try:
             vk_session.auth()
             vk_audio = audio.VkAudio(vk_session)
-            vk_cookies = rqst_cookies(lp[0])
+
+            try:
+                with open('cookies.txt') as f:
+                    vk_cookies = f.read()
+            except:
+                vk_cookies = rqst_cookies(lp[0])
 
         except AuthError as e:
             err('autechre error: %s' % str(e))

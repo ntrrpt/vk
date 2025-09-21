@@ -1,12 +1,12 @@
 from bs4 import BeautifulSoup
 
 from datetime import datetime
-from time import sleep
 from loguru import logger as log
 from pathlib import Path
 import requests
 import re
 import os
+import time
 import unicodedata
 
 from yarl import URL
@@ -16,6 +16,22 @@ import asyncio
 import aiofiles
 import aiohttp
 from tqdm import tqdm
+
+
+def get_with_retries(url, max_retries=10, retry_delay=10, proxy="", headers={}):
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = requests.get(url, proxies=proxies, headers=headers, timeout=15)
+            r.raise_for_status()
+            return r
+        except requests.exceptions.HTTPError as e:
+            raise Exception(f"http failed: {e!r}, status: {r.status_code}")
+        except requests.exceptions.RequestException as e:
+            log.warning(f"attempt {attempt} failed: {e!r}. retrying...")
+            time.sleep(retry_delay)
+    raise Exception(f"failed {url} after {max_retries} tries")
 
 
 async def dw_album(
@@ -177,6 +193,10 @@ def esc(name: str, replacement: str = "_") -> str:
     return r[:255]
 
 
+def escut(string: str, letters: int = 200) -> str:
+    return str_cut(esc(string), letters)
+
+
 def float_fmt(number: int, digits: int):
     return f"{number:.{digits}f}"
 
@@ -212,19 +232,6 @@ def expand_ranges(s):
         return ",".join(map(str, range(start, end + 1)))
 
     return re.sub(r"\d+-\d+", replace_range, s)
-
-
-# TODEL
-def rqst_str(url, retries=5, headers={"Accept-Encoding": "identity"}):
-    while retries:
-        try:
-            with requests.get(url, headers) as request:
-                if request:
-                    return request.content
-                return False
-        except:
-            sleep(5)
-            retries -= 1
 
 
 def check_ffmpeg():

@@ -10,9 +10,9 @@ import ffmpeg
 import concurrent.futures
 from glob import glob
 
-from loguru import logger as log
+import util
 
-tr, warn, inf, err, ok = (log.trace, log.warning, log.info, log.error, log.success)
+from loguru import logger as log
 
 from vk_api import VkApi
 from vk_api import audio
@@ -20,18 +20,6 @@ from vk_api.exceptions import AuthError, AccessDenied
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
-
-from utils import (
-    sizeof_fmt,
-    str_toplus,
-    str_tominus,
-    str_fix,
-    str_cut,
-    check_ffmpeg,
-    delete_file,
-    expand_ranges,
-    rqst_str,
-)
 
 m3u8_threads = 3
 skip_existing = True
@@ -54,7 +42,7 @@ def rqst_method(method, values={}):
 
             # invalid login/pass
             if "[5] User authorization failed:" in e:
-                err("autechre error: " + e[31:])
+                log.error("autechre error: " + e[31:])
                 sys.exit()
 
             # non-existing user
@@ -71,11 +59,11 @@ def rqst_method(method, values={}):
 
             # idk
             if "Internal server error" in e:
-                warn("internal catched, waiting...   ")
+                log.warning("internal catched, waiting...   ")
                 time.sleep(100)
 
             else:
-                err(f"execption in '{method}': {e}, values={values}   ")
+                log.error(f"execption in '{method}': {e}, values={values}   ")
                 time.sleep(10)
 
 
@@ -83,7 +71,7 @@ def rqst_multiple(track, final_name=""):
     # https://github.com/Zerogoki00/vk-audio-downloader
     def m3u8_block(block, key_url):
         def rqst_decryptor(u):
-            k = rqst_str(u)
+            k = util.get_with_retries(u, max_retries=50).content
             c = Cipher(
                 algorithms.AES(k), modes.CBC(b"\x00" * 16), backend=default_backend()
             )
@@ -94,9 +82,9 @@ def rqst_multiple(track, final_name=""):
         segment_urls = re.findall(r"#EXTINF:\d+\.\d{3},\s(\S*)", block)
 
         for s_url in segment_urls:
-            segments.append(
-                rqst_str(track["url"][: track["url"].rfind("/")] + "/" + s_url)
-            )  # base_url
+            # base_url
+            u = track["url"][: track["url"].rfind("/")] + "/" + s_url
+            segments.append(util.get_with_retries(u).content)
 
         if "METHOD=AES-128" in block:
             segment_key_url = re.findall(r':METHOD=AES-128,URI="(\S*)"', block)[0]
@@ -113,30 +101,30 @@ def rqst_multiple(track, final_name=""):
     block_size = 1024  # 1 Kibibyte
 
     name = "%s - %s" % (
-        str_cut(track["artist"], 100, ""),
-        str_cut(track["title"], 100, ""),
+        util.str_cut(track["artist"], 100, ""),
+        util.str_cut(track["title"], 100, ""),
     )
 
     desc = "%s - %s" % (
-        str_cut(track["artist"], 50, ""),
-        str_cut(track["title"], 50, ""),
+        util.str_cut(track["artist"], 50, ""),
+        util.str_cut(track["title"], 50, ""),
     )
 
     if not final_name:
         final_name = "%s (%s).mp3" % (name, track["id"])
-        final_name = str_fix(final_name, 0)  # ntfs escaping
+        final_name = util.escut(final_name, 0)  # ntfs escaping
 
     if skip_existing:
         glob_esc = {"[": "[[]", "]": "[]]"}
         glob_fn = "".join(glob_esc.get(c, c) for c in final_name)
         if glob("**/%s" % glob_fn, recursive=True):
-            warn("exists | %s " % desc)
+            log.warning("exists | %s " % desc)
             return
 
     if ".mp3" in track["url"]:
         with requests.get(track["url"], stream=True, timeout=10) as r:
             if not r:
-                err("%s: bad r (%s)" % (desc, r.status_code))
+                log.error("%s: bad r (%s)" % (desc, r.status_code))
                 return
 
             cl = int(r.headers.get("Content-Length", "0")) or None
@@ -153,20 +141,20 @@ def rqst_multiple(track, final_name=""):
                         ) * 100
 
                         progress(
-                            f"{desc}: {int(percent)}% {sizeof_fmt(cl)} / {sizeof_fmt(dw_total)}"
+                            f"{desc}: {int(percent)}% {util.sizeof_fmt(cl)} / {util.sizeof_fmt(dw_total)}"
                         )
 
                     except Exception as e:
-                        err("%s (%s)" % (os.path.basename(dir), str(e)))
+                        log.error("%s (%s)" % (os.path.basename(dir), str(e)))
                         time.sleep(5)
 
     elif ".m3u8" in track["url"]:
-        response = rqst_str(track["url"])
-        if not response:
-            err("rip response | %s" % track)
+        r = util.get_with_retries(track["url"]).content
+        if not r:
+            log.error("rip response | %s" % track)
             return
 
-        parts = response.decode("utf-8").split("#EXT-X-KEY")
+        parts = r.decode("utf-8").split("#EXT-X-KEY")
 
         blocks = []
         for b in parts:
@@ -174,7 +162,7 @@ def rqst_multiple(track, final_name=""):
                 blocks.append(b)
 
         if not blocks:
-            err("internal | %s" % desc)
+            log.error("internal | %s" % desc)
             return
 
         key_url = re.findall(r':METHOD=AES-128,URI="(\S*)"', blocks[0])[0]
@@ -206,7 +194,7 @@ def rqst_multiple(track, final_name=""):
                         file.write(future.result())
 
                 except Exception as e:
-                    err("%r ex: %s" % (blk, e))
+                    log.error("%r ex: %s" % (blk, e))
 
         # merging *.ts files in one
         with open("mu.ts", "wb") as ts:
@@ -215,10 +203,10 @@ def rqst_multiple(track, final_name=""):
                 with open(fn, "rb") as frg:
                     ts.write(frg.read())
 
-                delete_file(fn)  # saving disk space!
+                util.delete_file(fn)
                 print(f"{desc}: dd {i} / {len(blocks)}          ", end="\r")
     else:
-        err("nani | %s" % track)
+        log.error("nani | %s" % track)
         return
 
     md = [
@@ -248,28 +236,28 @@ def rqst_multiple(track, final_name=""):
     print(f"{desc}: merging...          ", end="\r")
     p.run(quiet=True)
 
-    delete_file(final_name)
+    util.delete_file(final_name)
     os.rename("mu.mp3", final_name)
-    delete_file("mu.ts")
-    delete_file("cover.jpg")
+    util.delete_file("mu.ts")
+    util.delete_file("cover.jpg")
 
-    size = sizeof_fmt(os.path.getsize(final_name))
-    ok("%s (%s)" % (desc, size))
+    size = util.sizeof_fmt(os.path.getsize(final_name))
+    log.success("%s (%s)" % (desc, size))
 
 
 if __name__ == "__main__":
 
-    def rqst_id(id):
-        id = str_toplus(id)
+    def rqst_id(uid):
+        uid = util.str_toplus(uid)
 
-        check_group = rqst_method("groups.getById", {"group_ids": id})
-        check_user = rqst_method("users.get", {"user_ids": id})
+        check_group = rqst_method("groups.getById", {"group_ids": uid})
+        check_user = rqst_method("users.get", {"user_ids": uid})
 
         if check_user:
-            i = str_toplus(check_user[0]["id"])
+            i = util.str_toplus(check_user[0]["id"])
             n = f"{check_user[0]['first_name']} {check_user[0]['last_name']}"
         elif check_group:
-            i = str_tominus(check_group[0]["id"])
+            i = util.str_tominus(check_group[0]["id"])
             n = check_group[0]["name"]
         else:
             return None
@@ -281,21 +269,21 @@ if __name__ == "__main__":
             album["access_hash"] = ""
 
         if "title" not in album:
-            inf("album w/o title, trying to guess...")
+            log.info("album w/o title, trying to guess...")
             try:
                 for al in vk_audio.get_albums_iter(owner_id=album["owner_id"]):
                     if int(al["id"]) == int(album["id"]) and "title" in al:
-                        inf("found: %s" % al["title"])
+                        log.info("found: %s" % al["title"])
                         album["title"] = al["title"]
 
                 if "title" not in album:
                     raise Exception
             except:
-                warn("failed ToT")
+                log.warning("failed ToT")
                 album["title"] = ""
 
-        path = "%s - (%s)" % (str_cut(album["title"], 200), album["id"])
-        path = str_fix(path, 0)
+        path = "%s - (%s)" % (util.str_cut(album["title"], 200), album["id"])
+        path = util.esc(path, 0)
         os.makedirs(path, exist_ok=True)
         os.chdir(path)
 
@@ -305,7 +293,7 @@ if __name__ == "__main__":
             ):
                 rqst_multiple(track)
         except AccessDenied:
-            err(f"no access | {path}")
+            log.error(f"no access | {path}")
 
         os.chdir("..")
 
@@ -319,8 +307,8 @@ if __name__ == "__main__":
         level=5,
     )
 
-    if not check_ffmpeg():
-        err("ffmpeg not found")
+    if not util.check_ffmpeg():
+        log.error("ffmpeg not found")
         sys.exit()
 
     # parse args
@@ -367,7 +355,7 @@ if __name__ == "__main__":
     skip_existing = options.skip_existing
 
     if options.range:
-        spl = expand_ranges(options.range).split(",")
+        spl = util.expand_ranges(options.range).split(",")
         ranges = [int(x.strip("'")) for x in spl]
 
     if ":" not in options.login_info:
@@ -380,7 +368,7 @@ if __name__ == "__main__":
         vk_session.auth()
         vk_audio = audio.VkAudio(vk_session)
     except AuthError as e:
-        err("autechre error: %s" % str(e))
+        log.error("autechre error: %s" % str(e))
         sys.exit(1)
 
     if options.query:
@@ -404,13 +392,13 @@ if __name__ == "__main__":
             if r != "0":
                 break
 
-        spl = expand_ranges(r).split(",")
+        spl = util.expand_ranges(r).split(",")
         rng = [int(x.strip("'")) for x in spl]
 
         if not rng:
             sys.exit()
 
-        path = str_fix(options.query)
+        path = util.esc(options.query)
         os.makedirs(path, exist_ok=True)
         os.chdir(path)
 
@@ -457,23 +445,23 @@ if __name__ == "__main__":
 
         target = rqst_id(arg)
         if not target:
-            err("%s invalid." % arg)
+            log.error("%s invalid." % arg)
             continue
 
-        inf(f"{i} / {len(arguments)} | {target['name']}")
+        log.info(f"{i} / {len(arguments)} | {target['name']}")
 
         path = "%s (%s)" % (target["name"], target["id"])
-        path = str_fix(path)
+        path = util.escut(path)
 
         os.makedirs(path, exist_ok=True)
         os.chdir(path)
 
         if not options.album and not options.music:
-            warn("no '-m' or '-a' option, dumping all")
+            log.warning("no '-m' or '-a' option, dumping all")
             options.album = options.music = True
 
         if options.album:
-            inf("looking for albums...")
+            log.info("looking for albums...")
             albums_list = vk_audio.get_albums(owner_id=target["id"])
 
             for i, album in enumerate(albums_list, start=1):
@@ -482,12 +470,12 @@ if __name__ == "__main__":
                         break
                     continue
 
-                inf(f"{i} / {len(albums_list)} | {album['title']}")
+                log.info(f"{i} / {len(albums_list)} | {album['title']}")
                 rqst_album(album)
                 print("")
 
         if options.music and not (options.album and ranges):
-            inf("downloading tracks...")
+            log.info("downloading tracks...")
 
             for i, track in enumerate(
                 vk_audio.get_iter(owner_id=target["id"]), start=1

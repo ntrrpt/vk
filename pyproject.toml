@@ -33,3 +33,5 @@ vk-api = { git = "https://github.com/python273/vk_api", rev = "495ecb73b2e3308cc
 [tool.ruff.format]
 line-ending = "lf"
 
+[tool.ruff]
+lint.ignore = ["E722"]

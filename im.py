@@ -4,138 +4,33 @@ import sys
 import json
 import time
 import random
-import optparse
 import os
 import io
 import re
 import pathlib
 import shutil
 import requests
+import argparse
 
 from blank import mainfile, def_blank, fwd_blank, jnd_blank
-from utils import (
-    sizeof_fmt,
-    html_fmt,
-    fix_val,
-    str_toplus,
-    str_tominus,
-    str_fix,
-    str_cut,
-    text_append,
-    delete_file,
-)
-
 import mu
+import util
+
 import yt_dlp
 from PIL import Image
 from tabulate import tabulate
 from loguru import logger as log
 from vk_api import VkApi, audio
-from vk_api.exceptions import AuthError
-
-tr, warn, inf, err, ok = (log.trace, log.warning, log.info, log.error, log.success)
+from vk_api.exceptions import AuthError, Captcha
 
 prev_id = prev_date = offset_count = items_done = 0
 vk_cookies = "# Netscape HTTP Cookie File\n"
 progress_str = ""
 
-parser = optparse.OptionParser()
-parser.add_option(
-    "--novoice",
-    dest="skip_voices",
-    action="store_true",
-    help="don't save voice messages",
-)
-parser.add_option(
-    "--nomusic", dest="skip_music", action="store_true", help="don't save music files"
-)
-parser.add_option(
-    "--novideo", dest="skip_video", action="store_true", help="don't save video files"
-)
-parser.add_option(
-    "--nophoto", dest="skip_photos", action="store_true", help="don't save pictures"
-)
-parser.add_option(
-    "--nograffiti",
-    dest="skip_graffiti",
-    action="store_true",
-    help="don't save graffiti",
-)
-parser.add_option(
-    "--nostickers",
-    dest="skip_stickers",
-    action="store_true",
-    help="don't save stickers",
-)
-parser.add_option(
-    "--nodoc", dest="skip_docs", action="store_true", help="don't save documents"
-)
-parser.add_option(
-    "--nojson",
-    dest="skip_json",
-    action="store_true",
-    help="don't save json applications",
-)
-parser.add_option(
-    "-a",
-    "--noall",
-    dest="skip_all",
-    action="store_true",
-    help="don't save anything (except json)",
-)
-parser.add_option(
-    "-l",
-    "--login",
-    dest="login_info",
-    default="",
-    help="login info (token or login:pass)",
-)
-parser.add_option(
-    "-n",
-    "--pagenum",
-    dest="page_number",
-    type=int,
-    default="1000",
-    help="number of messages in one html file",
-)
-parser.add_option(
-    "-r",
-    "--rewrite",
-    dest="rewrite_files",
-    action="store_true",
-    help="force rewriting files",
-)
-parser.add_option(
-    "-t",
-    "--threads",
-    dest="threads_count",
-    type=int,
-    default="5",
-    help="number of threads for m3u8 downloading",
-)
-parser.add_option(
-    "-v",
-    "--verbose",
-    dest="verbose",
-    action="store_true",
-    help="verbose logging to file",
-)
-options, arguments = parser.parse_args()
-
-if options.skip_all:
-    options.skip_music = True
-    options.skip_voices = True
-    options.skip_photos = True
-    options.skip_graffiti = True
-    options.skip_stickers = True
-    options.skip_docs = True
-
-options.page_number = int(options.page_number) // 200 + 1
-
 
 def progress(string, force=False):
-    if not force and options.verbose:
-        inf(string)
+    if not force and args.verbose:
+        log.info(string)
         return
 
     print(" " * os.get_terminal_size().columns, end="\r")
@@ -147,7 +42,7 @@ def rqst_file(url, path):
         return
 
     # TODO: bytes mismatch detection
-    if os.path.exists(path) and not options.rewrite_files:
+    if os.path.exists(path) and not args.rewrite:
         return
 
     block_size = 1024
@@ -158,11 +53,11 @@ def rqst_file(url, path):
         try:
             with requests.get(url, stream=True, timeout=10) as request:
                 if not request:
-                    err(f"({request.status_code}) {path}")
+                    log.error(f"({request.status_code}) {path}")
                     return
 
                 cl = int(request.headers.get("Content-Length", "0")) or 10000
-                dw_len = fix_val(cl / 1048576, 2)
+                dw_len = util.float_fmt(cl / 1048576, 2)
 
                 progress(f"{progress_str} | {dw_len}MB {path}")
 
@@ -174,15 +69,15 @@ def rqst_file(url, path):
 
                         if time.time() - now > 2:
                             now = time.time()
-                            dw_now = fix_val(dw_total / 1048576, 2)
+                            dw_now = util.float_fmt(dw_total / 1048576, 2)
                             m = f"{progress_str} | {dw_now}MB / {dw_len}MB {path}"
                             progress(m, True)
             return
         except:
-            warn(f"{progress_str} | retry {path}")
+            log.warning(f"{progress_str} | retry {path}")
             max_tries -= 1
 
-    err(f"{progress_str} | timeout {path}")
+    log.error(f"{progress_str} | timeout {path}")
 
 
 def str_esc(string, url_parse=False):
@@ -205,10 +100,10 @@ def str_esc(string, url_parse=False):
     link_matches = re.finditer(url_regex, string)  # , re.MULTILINE)
     for match in link_matches:
         mg = match.group()
-        if mg not in replaced and mg[:+4] in ["http", "vk.co"]:
+        if mg not in replaced and mg.startswith(("http", "vk.com")):
             replaced.append(mg)
             string = string.replace(
-                mg, f'<a href="{mg}" title="{mg}">{str_cut(mg, 50)}</a>'
+                mg, f'<a href="{mg}" title="{mg}">{util.str_cut(mg, 50)}</a>'
             )
 
     return string
@@ -218,7 +113,7 @@ def rqst_thumb(path, th_w, th_h):
     try:
         img = Image.open(path).convert("RGB")
     except:
-        err("corrupted image %s" % path)
+        log.error("corrupted image %s" % path)
         return {"path": "broken", "height": 100, "width": 100}
 
     src_w, src_h = img.size
@@ -273,7 +168,8 @@ def rqst_user(user_id, save=True):
         }
     else:
         r = rqst_method(
-            "groups.getById", {"group_id": str_toplus(user_id), "fields": "photo_200"}
+            "groups.getById",
+            {"group_id": util.str_toplus(user_id), "fields": "photo_200"},
         )[0]
         user = {"id": user_id, "photo": r["photo_200"], "name": r["name"]}
 
@@ -295,7 +191,7 @@ def rqst_method(method, values={}):
 
             # invalid login/pass
             if "[5] User authorization failed:" in e:
-                err("autechre error: " + e[31:])
+                log.error("autechre error: " + e[31:])
                 sys.exit()
 
             # non-existing user
@@ -312,11 +208,11 @@ def rqst_method(method, values={}):
 
             # idk
             if "Internal server error" in e:
-                warn("internal catched, waiting...   ")
+                log.warning("internal catched, waiting...   ")
                 time.sleep(100)
 
             else:
-                err(f"execption in '{method}': {e}, values={values}   ")
+                log.error(f"execption in '{method}': {e}, values={values}   ")
                 time.sleep(10)
 
 
@@ -333,13 +229,15 @@ def rqst_message_service(input):
     match TYPE:
         case "chat_create":
             message = (
-                url_link % (from_prefix + str_toplus(from_id["id"]), from_id["name"])
+                url_link
+                % (from_prefix + util.str_toplus(from_id["id"]), from_id["name"])
                 + f" создал беседу «{input['action']['text']}»"
             )
 
         case "chat_title_update":
             message = (
-                url_link % (from_prefix + str_toplus(from_id["id"]), from_id["name"])
+                url_link
+                % (from_prefix + util.str_toplus(from_id["id"]), from_id["name"])
                 + f" изменил название беседы на «{input['action']['text']}»"
             )
 
@@ -356,7 +254,7 @@ def rqst_message_service(input):
             )
 
             message = (
-                f"{url_link % (from_prefix + str_toplus(from_id['id']), from_id['name'])} обновил фотографию беседы\n"
+                f"{url_link % (from_prefix + util.str_toplus(from_id['id']), from_id['name'])} обновил фотографию беседы\n"
                 f'<div class="userpic_wrap">'
                 f'    <a class="userpic_link" href="userpics/up{input["conversation_message_id"]}.jpg">\n'
                 f'        <img class="userpic" src="userpics/up{input["conversation_message_id"]}.jpg" style="width: 60px; height: 60px">'
@@ -365,7 +263,7 @@ def rqst_message_service(input):
             )
 
         case "chat_photo_remove":
-            message = f"{url_link % (from_prefix + str_toplus(from_id['id']), from_id['name'])} удалил фотографию беседы\n"
+            message = f"{url_link % (from_prefix + util.str_toplus(from_id['id']), from_id['name'])} удалил фотографию беседы\n"
 
         case "chat_pin_message" | "chat_unpin_message":
             prefix = " закрепил " if TYPE == "chat_pin_message" else " открепил "
@@ -409,20 +307,22 @@ def rqst_message_service(input):
 
             if input["from_id"] == input["action"]["member_id"]:
                 message = (
-                    url_link % (us_prefix + str_toplus(from_id["id"]), from_id["name"])
+                    url_link
+                    % (us_prefix + util.str_toplus(from_id["id"]), from_id["name"])
                     + self_prefix
                 )
             else:
                 passive = rqst_user(input["action"]["member_id"])
                 message = (
-                    url_link % (us_prefix + str_toplus(from_id["id"]), from_id["name"])
+                    url_link
+                    % (us_prefix + util.str_toplus(from_id["id"]), from_id["name"])
                     + other_prefix
                     + url_link
-                    % (us_postfix + str_toplus(passive["id"]), passive["name"])
+                    % (us_postfix + util.str_toplus(passive["id"]), passive["name"])
                 )
 
         case _:
-            err(f"missing_service: {input}")
+            log.error(f"missing_service: {input}")
 
     return f'\n<div class="message service" id="message{input["id"]}"><div class="body details">\n    {message}</div>\n</div>\n'
 
@@ -468,7 +368,7 @@ def rqst_attachments(input):
 
         data_fragment = "missing_attachment = %s" % a
         json_fragment = ""
-        if not options.skip_json:
+        if not args.nojson:
             json_fragment = f'title="{str_esc(json.dumps(a, indent=10, ensure_ascii=False, sort_keys=True))}"'
 
         match TYPE:
@@ -476,19 +376,19 @@ def rqst_attachments(input):
                 # TODO: need 'remixnsid' cookie for private videos
                 v_id = "%s_%s" % (a["video"]["owner_id"], a["video"]["id"])
                 link = "https://vk.com/video" + v_id
-                href = "videos/%s (%s).mp4" % (str_fix(a["video"]["title"], 200), v_id)
+                href = f"videos/{util.escut(a['video']['title'])} ({v_id}).mp4"
 
                 try:
-                    if options.skip_video:
+                    if args.novideo:
                         raise StopIteration
 
                     if os.path.exists(href):
-                        if not options.rewrite_files:
+                        if not args.rewrite:
                             raise StopIteration
-                        delete_file(href)
+                        util.delete(href)
 
                     opts = {
-                        "quiet": not options.verbose,
+                        "quiet": not args.verbose,
                         "verbose": False,
                         "outtmpl": href,
                         "format": "best",
@@ -505,15 +405,15 @@ def rqst_attachments(input):
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         ydl.download([link])
 
-                    if options.verbose:
-                        tr(f"{progress_str} | {href}")
+                    if args.verbose:
+                        log.trace(f"{progress_str} | {href}")
 
                 except StopIteration:
                     pass
 
                 except:
-                    if options.verbose:
-                        warn(f"{progress_str} | {href}")
+                    if args.verbose:
+                        log.warning(f"{progress_str} | {href}")
                     href = link
 
                 data_fragment = data_blank % (
@@ -523,25 +423,25 @@ def rqst_attachments(input):
                 )
 
             case "audio":
-                artist = str_cut(a["audio"]["artist"], 100, "")
-                title = str_cut(a["audio"]["title"], 100, "")
+                artist = util.str_cut(a["audio"]["artist"], 100, "")
+                title = util.str_cut(a["audio"]["title"], 100, "")
                 audio_name = "%s - %s" % (artist, title)
                 audio_name = "%s (%s_%s)" % (
                     audio_name,
                     a["audio"]["owner_id"],
                     a["audio"]["id"],
                 )
-                audio_name = str_fix(audio_name, 0)
+                audio_name = util.escut(audio_name)
 
                 try:
                     href = f"music/{audio_name}.mp3"
-                    if options.skip_music:
+                    if args.nomusic:
                         raise Exception()
 
                     if os.path.exists(href):
-                        if not options.rewrite_files:
+                        if not args.rewrite:
                             raise StopIteration
-                        delete_file(href)
+                        util.delete(href)
 
                     audio = vk_audio.get_audio_by_id(
                         a["audio"]["owner_id"], a["audio"]["id"]
@@ -549,8 +449,8 @@ def rqst_attachments(input):
                     mu.rqst_multiple(audio, href)
 
                 except StopIteration:
-                    if options.verbose:
-                        inf(f"{progress_str} | {href}")
+                    if args.verbose:
+                        log.info(f"{progress_str} | {href}")
                     pass
                 except:
                     href = f"https://m.vk.com/audio{a['audio']['owner_id']}_{a['audio']['id']}"
@@ -613,11 +513,11 @@ def rqst_attachments(input):
 
             case "doc":
                 # what
-                namefile = str_fix(str_cut(a["doc"]["title"], 80, ""))
+                namefile = util.escut(a["doc"]["title"], 80)
                 if namefile[-len(a["doc"]["ext"]) :] == a["doc"]["ext"]:
                     namefile = namefile[: -len(a["doc"]["ext"]) - 1]
 
-                if options.skip_docs:
+                if args.nodoc:
                     href = a["doc"]["url"]
                 else:
                     href = f"docs/{namefile}-{i}-{input['conversation_message_id']}_{human_date}.{a['doc']['ext']}"
@@ -626,7 +526,7 @@ def rqst_attachments(input):
                 data_fragment = data_blank % (
                     f'<a class="media clearfix pull_left block_link media_file" {json_fragment} href="{href}">',
                     namefile + "." + a["doc"]["ext"],
-                    f"{sizeof_fmt(a['doc']['size'])} ({a['doc']['owner_id']}_{a['doc']['id']})",
+                    f"{util.sizeof_fmt(a['doc']['size'])} ({a['doc']['owner_id']}_{a['doc']['id']})",
                 )
 
             case "call":
@@ -652,7 +552,7 @@ def rqst_attachments(input):
                 )
 
             case "graffiti":
-                if options.skip_graffiti:
+                if args.nograffiti:
                     data_fragment = data_blank % (
                         f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{a["graffiti"]["url"]}">',
                         "Граффити",
@@ -669,7 +569,7 @@ def rqst_attachments(input):
                     )
 
             case "audio_message":
-                if options.skip_voices:
+                if args.novoice:
                     href = a["audio_message"]["link_ogg"]
                 else:
                     href = f"voice_messages/audio-{i}-{input['conversation_message_id']}_{human_date}.ogg"
@@ -682,7 +582,7 @@ def rqst_attachments(input):
                 )
 
             case "sticker":
-                if options.skip_stickers:
+                if args.nosticker:
                     data_fragment = data_blank % (
                         f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{a["sticker"]["images"][1]["url"]}">',
                         "Стикер",
@@ -702,7 +602,7 @@ def rqst_attachments(input):
             case "photo":
                 p = rqst_photo(a["photo"])
 
-                if options.skip_photos:
+                if args.nophoto:
                     data_fragment = data_blank % (
                         f'<a class="media clearfix pull_left block_link media_photo" {json_fragment} href="{p["url"]}">',
                         "Фото",
@@ -724,7 +624,7 @@ def rqst_attachments(input):
                     )
 
             case _:
-                err(f"missing_attachment: {a}")
+                log.error(f"missing_attachment: {a}")
 
         if sw_joined:
             post_attachments += (
@@ -751,7 +651,7 @@ def rqst_message(input, forwarded=False):
     if from_id["id"] > 0:
         sender = f'<a href="https://vk.com/id{from_id["id"]}">{from_id["name"]}</a>'
     else:
-        sender = f'<a href="https://vk.com/club{str_toplus(from_id["id"])}">{from_id["name"]}</a>'
+        sender = f'<a href="https://vk.com/club{util.str_toplus(from_id["id"])}">{from_id["name"]}</a>'
 
     # message sending/changing time
     date = datetime.fromtimestamp(input["date"]).strftime("%d/%m/%y %H:%M:%S")
@@ -804,7 +704,7 @@ def rqst_message(input, forwarded=False):
 
 def makehtml(filename, page, count, target, chat, const_offset_count):
     global progress_str, items_done, offset_count
-    for i in range(options.page_number):
+    for i in range(args.pagenum):
         # empty check
         while True:
             chunk = rqst_method(
@@ -825,7 +725,7 @@ def makehtml(filename, page, count, target, chat, const_offset_count):
             items_done += 1
 
             # html msg
-            text_append(
+            util.append(
                 filename,
                 rqst_message_service(msg) if "action" in msg else rqst_message(msg),
             )
@@ -833,18 +733,18 @@ def makehtml(filename, page, count, target, chat, const_offset_count):
             # json msg
             s = ",%s"
             if not os.path.isfile("result.json"):
-                text_append("result.json", "[")
+                util.append("result.json", "[")
                 s = "%s"
 
-            text_append("result.json", s % json.dumps(msg, ensure_ascii=False))
+            util.append("result.json", s % json.dumps(msg, ensure_ascii=False))
 
             # status stuff
-            progress_str = f"[{str_cut(str_fix(chat['title']), 20)}]"
-            progress_str += f" {fix_val((items_done) / count * 100, 1)}%"
+            progress_str = f"[{util.escut(chat['title'], 20)}]"
+            progress_str += f" {util.float_fmt((items_done) / count * 100, 1)}%"
             progress_str += f" {items_done}/{count}"
             progress_str += f" u{len(users)}"
-            progress_str += f" pg{page + 1}/{count // (200 * options.page_number) + 1}"
-            progress_str += f" pgch{i + 1}/{options.page_number}"
+            progress_str += f" pg{page + 1}/{count // (200 * args.pagenum) + 1}"
+            progress_str += f" pgch{i + 1}/{args.pagenum}"
             progress_str += (
                 f" allch{const_offset_count - offset_count}/{const_offset_count}"
             )
@@ -867,7 +767,7 @@ def makedump(target):
         )
 
         if r is None:
-            err("no access to %s" % target)
+            log.error("no access to %s" % target)
             return
 
         chat = {
@@ -892,7 +792,7 @@ def makedump(target):
         chat = {"title": r["name"], "photo": r["photo"]}
 
         if r is None:
-            err("no access to %s" % target)
+            log.error("no access to %s" % target)
             return
 
         info = (
@@ -902,7 +802,7 @@ def makedump(target):
         )
 
     # directory preparation
-    d = str_cut(str_fix(chat["title"]), 40, "")
+    d = util.escut(chat["title"], 40)
     work_dir = "%s (%s)" % (d, target)
 
     shutil.copytree("blank", work_dir, dirs_exist_ok=True)
@@ -925,21 +825,21 @@ def makedump(target):
     count = rqst_method("messages.getHistory", {"peer_id": target, "count": 0})["count"]
 
     const_offset_count = offset_count = count // 200 + 1
-    page_count = count // (200 * options.page_number) + 1
+    page_count = count // (200 * args.pagenum) + 1
 
     for page in range(page_count):
         filename = "messages%s.html" % (page + 1)
         pathlib.Path(filename).unlink(missing_ok=True)
 
         # html header
-        text_append(
+        util.append(
             filename, mainfile % (str_esc(chat["title"]), info, str_esc(chat["title"]))
         )
 
         # to the previous page
         if page:
             a = f'\n<a class="pagination block_link" href="messages{page}.html">Предыдущая страница ( {page} / {page_count} )</a>\n'
-            text_append(filename, a)
+            util.append(filename, a)
 
         # writing messages
         makehtml(filename, page, count, target, chat, const_offset_count)
@@ -947,16 +847,16 @@ def makedump(target):
         # to the next page
         if page + 1 != page_count:
             a = f'\n<a class="pagination block_link" href="messages{page + 2}.html">Cледующая страница ( {page + 2} / {page_count} )</a>\n'
-            text_append(filename, a)
+            util.append(filename, a)
 
         # html eof
-        text_append(filename, "</div></div></div></body></html>")
+        util.append(filename, "</div></div></div></body></html>")
 
         # prettify
-        html_fmt(filename)
+        util.html_fmt(filename)
 
     # json eof
-    text_append("result.json", "]")
+    util.append("result.json", "]")
 
     # beatify json + irc.txt generation
     with open("result.json", "r", encoding="utf-8") as f:
@@ -971,20 +871,60 @@ def makedump(target):
         u = rqst_user(msg["from_id"])
         table.append([u["name"], msg["text"]])
 
-    text_append("irc.txt", tabulate(table, tablefmt="plain"))
+    util.append("irc.txt", tabulate(table, tablefmt="plain"))
 
     with open("result.json", "w", encoding="utf-8") as f:
         json.dump(d, f, indent=4, ensure_ascii=False)
 
-    end_time = fix_val(time.time() - start_time, 0)
+    end_time = util.float_fmt(time.time() - start_time, 0)
     end_time = timedelta(seconds=int(end_time))
 
-    ok(f"{chat['title']} finished in {end_time} ")
+    log.success(f"{chat['title']} finished in {end_time} ")
     os.chdir("..")
 
 
 if __name__ == "__main__":
-    # loguru custom preset
+    # fmt: off
+    ap = argparse.ArgumentParser()
+
+    g = ap.add_argument_group('main options')
+    add = g.add_argument
+
+    add("-a", "--auth",    default="",             help="login info (token or login:pass)")
+    add("-n", "--pagenum", type=int, default=1000, help="number of messages in one html file")
+    add("-r", "--rewrite", action="store_true",    help="force rewriting files")
+    add("-t", "--threads", type=int, default=5,    help="number of threads for m3u8 downloading")
+    add("-v", "--verbose", action="store_true",    help="verbose logging to file")
+
+    g = ap.add_argument_group('filter options')
+    add = g.add_argument
+
+    add("--novoice",    action="store_true", help="don't save voice messages")
+    add("--nomusic",    action="store_true", help="don't save music files")
+    add("--novideo",    action="store_true", help="don't save video files")
+    add("--nophoto",    action="store_true", help="don't save pictures")
+    add("--nograffiti", action="store_true", help="don't save graffiti")
+    add("--nosticker",  action="store_true", help="don't save stickers")
+    add("--nodoc",      action="store_true", help="don't save documents")
+    add("--nojson",     action="store_true", help="don't save json applications")
+    add("--noall",      action="store_true", help="don't save anything (except json)")
+
+    ap.add_argument("targets", nargs="*", help="dialogs to dump")
+
+    args = ap.parse_args()
+    # fmt: on
+
+    if args.noall:
+        args.nomusic = True
+        args.novideo = True
+        args.novoice = True
+        args.nophoto = True
+        args.nograffiti = True
+        args.nosticker = True
+        args.nodoc = True
+
+    args.pagenum = args.pagenum // 200 + 1
+
     log.remove(0)
     log.add(
         sys.stderr,
@@ -1006,12 +946,11 @@ if __name__ == "__main__":
 
         if login in data:
             for cookie in data[login]["cookies"]:
-                s = "%s\tTRUE\t/\tTRUE\t0\t%s\t%s\n" % (
+                ret += "%s\tTRUE\t/\tTRUE\t0\t%s\t%s\n" % (
                     cookie["domain"],
                     cookie["name"],
                     cookie["value"],
                 )
-                ret += s
 
         return ret
 
@@ -1035,16 +974,16 @@ if __name__ == "__main__":
                 if conv_id not in conversations:
                     conversations.append(conv_id)
 
-        inf("loaded %s dialogs!" % len(conversations))
+        log.info("loaded %s dialogs!" % len(conversations))
         return conversations
 
-    if not options.login_info:
-        options.login_info = f"{input('Login: ')}:{input('Pass: ')}"
+    if not args.auth:
+        args.auth = f"{input('Login: ')}:{input('Pass: ')}"
 
-    if ":" in options.login_info:
-        lp = options.login_info.split(":")
-
+    if ":" in args.auth:
+        lp = args.auth.split(":")
         vk_session = VkApi(lp[0], lp[1], app_id=6287487)
+
         try:
             vk_session.auth()
             vk_audio = audio.VkAudio(vk_session)
@@ -1055,43 +994,44 @@ if __name__ == "__main__":
             except:
                 vk_cookies = rqst_cookies(lp[0])
 
-        except AuthError as e:
-            err("autechre error: %s" % str(e))
+        except AuthError as ex:
+            log.error("autechre error: %s" % str(ex))
             sys.exit(1)
 
-    elif len(options.login_info) >= 85:
-        vk_session = VkApi(token=options.login_info)
-        warn("token used, music will not dumped")
-        options.skip_music = True
+        except Captcha as ex:
+            log.warning("captcha url: %s" % ex.get_url())
+            sys.exit(1)
+
+    elif len(args.auth) >= 85:
+        vk_session = VkApi(token=args.auth)
+        log.warning("token used, music will not dumped")
+        args.skip_music = True
 
     else:
-        err("login info is invalid!")
+        log.error("login info is invalid!")
         sys.exit(1)
 
     me = rqst_method("users.get")[0]
-    me_fl = str_fix(me["first_name"] + " " + me["last_name"])
+    me_fl = util.esc(me["first_name"] + " " + me["last_name"])
     m = "%s (%s)" % (me_fl, me["id"])
-    inf(m)
 
-    if options.verbose:
+    if args.verbose:
         log.add(
             "%s.txt" % m,
             backtrace=True,
             diagnose=True,
-            format="{time:YYYY-MM-DD HH:mm:ss.SSS zz} | <level>{level: <8}</level> | L {line: >4} ({file}): {message}",
             colorize=False,
             level=5,
         )
+    log.info(m)
 
     conversations = rqst_dialogs()
 
-    if not arguments:
+    if not args.targets:
         # no args = dump all
         start_time = time.time()
 
-        me_dir = (
-            f"Диалоги {str_fix(me['first_name'] + ' ' + me['last_name'])} ({me['id']})"
-        )
+        me_dir = f"Диалоги {util.escut(me['first_name'] + ' ' + me['last_name'])} ({me['id']})"
         os.makedirs(me_dir, exist_ok=True)
         if not os.path.exists(f"{me_dir}/blank"):
             shutil.copytree("blank", f"{me_dir}/blank")
@@ -1103,24 +1043,25 @@ if __name__ == "__main__":
             progress_str = ""
             makedump(conversations[i])
 
-        end_time = fix_val(time.time() - start_time, 0)
+        # FIXME: stopwatch
+        end_time = util.float_fmt(time.time() - start_time, 0)
         end_time = timedelta(seconds=int(end_time))
 
-        inf("all saved in: %s" % end_time)
+        log.info("all saved in: %s" % end_time)
 
         shutil.rmtree("blank")
         sys.exit()
 
-    for i in arguments:
+    for t in args.targets:
         users = {}
         prev_id = items_done = prev_date = 0
         progress_str = ""
 
-        if i == "me":
+        if t == "me":
             makedump(rqst_method("users.get")[0]["id"])
 
-        elif i.startswith("@"):
-            makedump(2000000000 + int(i[1:]))
+        elif t.startswith("@"):
+            makedump(2000000000 + int(t[1:]))
 
         else:
             work = None
@@ -1128,16 +1069,16 @@ if __name__ == "__main__":
             if isinstance(work, int):
                 work = abs(work)
 
-            check_group = rqst_method("groups.getById", {"group_ids": i})
-            check_user = rqst_method("users.get", {"user_ids": i})
+            check_group = rqst_method("groups.getById", {"group_ids": t})
+            check_user = rqst_method("users.get", {"user_ids": t})
 
             # сhecking for id in dialogs (can be disabled)
             if check_group is not None and -check_group[0]["id"] in conversations:
-                work = str_tominus(check_group[0]["id"])
+                work = util.str_tominus(check_group[0]["id"])
             if check_user is not None and check_user[0]["id"] in conversations:
-                work = str_toplus(check_user[0]["id"])
+                work = util.str_toplus(check_user[0]["id"])
 
             if work is None:
-                err(f"{i} is invalid")
+                log.error(f"{t} is invalid")
             else:
                 makedump(int(work))

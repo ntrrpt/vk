@@ -302,20 +302,21 @@ def parse_link(i_work):
 
 
 if __name__ == "__main__":
+    # fmt: off
     ap = argparse.ArgumentParser()
     add = ap.add_argument
 
-    # fmt: off
     add("-a", "--auth",     default=login_info,   help="Login info (token of login:pass)")
     add("-t", "--threads",  type=int, default=5,  help="Number of threads")
     add("-s", "--simulate", action="store_true",  help="Simulate (not download, only json with urls)")
     add("-d", "--delay",    type=int, default=15, help="Delay between chunks requests (in seconds)")
     add("-j", "--json",     action="store_true",  help="album.json parsing")
     add("-v", "--verbose",  action="store_true",  help="Verbose output")
+
     add("targets",          nargs="*",            help="users / groups to dump")
-    # fmt: on
 
     args = ap.parse_args()
+    # fmt: on
 
     log.remove()
     log.add(
@@ -362,13 +363,13 @@ if __name__ == "__main__":
         if args.targets:
             for t in args.targets:
                 rqst_json(t)
+            sys.exit()
 
-        else:
-            for file in Path(".").rglob("*.json"):
-                if any(part.startswith(".") for part in file.parts):  # .venv
-                    continue
+        for file in Path(".").rglob("*.json"):
+            if any(part.startswith(".") for part in file.parts):  # .venv
+                continue
 
-                rqst_json(file)
+            rqst_json(file)
 
         sys.exit()
 

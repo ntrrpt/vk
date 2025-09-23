@@ -253,16 +253,16 @@ def parse_link(i_work):
         "photos.getAlbums", {"owner_id": t_work, "album_ids": 0, "need_system": 1}
     )
 
-    # no access to albums
-    if not albums:
-        log.error("no access to albums")
-        return
-
     t_path.mkdir(parents=True, exist_ok=True)
     log.info(f"{i_work} => {t_path}")
 
-    if albums is None:  # public detected
-        log.warning("group photos disabled, downloading only wall photos")
+    if albums is None:
+        if not t_work.startswith("-"):
+            log.error("no access to albums")
+            return
+
+        # public detected => group photos disabled
+        # downloading only profile/wall photos
 
         log.info("1 / 2 (profile)")
         get_album(t_info, t_path, f"{t_work}_0")
@@ -270,7 +270,7 @@ def parse_link(i_work):
         log.info("2 / 2 (wall)")
         get_album(t_info, t_path, f"{t_work}_00")
     else:
-        if "-" in t_work:
+        if t_work.startswith("-"):
             log.info(f"0 / {len(albums['items'])} (wall)")
             get_album(t_info, t_path, f"{t_work}_00")
 
